@@ -21,19 +21,20 @@ parser.add_argument("--exp_name", type=str, default='ray_test0', help='experimen
 
 # environment
 parser.add_argument('--env_name', type=str, default='Humanoid-v2', help='name of env')
-parser.add_argument('--env_num', type=int, default=4, help='number of evironments per worker')
-parser.add_argument('--total_frames', type=int, default=int(1.2e6), help='optimization batch size')
+parser.add_argument('--env_num', type=int, default=2, help='number of evironments per worker')
+parser.add_argument('--total_frames', type=int, default=int(5e6), help='optimization batch size')
 
 # important parameters of model and algorithm
 parser.add_argument('--hidden_dim', type=int, default=64, help='hidden layer size of mlp & gru')
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
-parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
+parser.add_argument('--n_epoch', type=int, default=6, help='update epoches in each training step')
+parser.add_argument('--n_mini_batch', type=int, default=4, help='number of minibatches in 1 training epoch')
+parser.add_argument('--lr', type=float, default=7e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
 parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lamb', type=float, default=0.97, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
-parser.add_argument('--update_every', type=int, default=6, help='update times in each training step')
-parser.add_argument('--max_grad_norm', type=float, default=40.0, help='maximum gradient norm')
+parser.add_argument('--max_grad_norm', type=float, default=50.0, help='maximum gradient norm')
 
 # recurrent model parameters
 parser.add_argument('--burn_in_len', type=int, default=20, help='rnn hidden state burn-in length')
@@ -133,19 +134,25 @@ if __name__ == "__main__":
         post['hidden_state'] = model.step(state, hidden_state, burn_in=True)
 
         # training loop: compute loss and backpropogate gradient update
-        loss_record = dict(p_loss=[], v_loss=[], entropy_loss=[])
-        for _ in range(kwargs['update_every']):
-            optimizer.zero_grad()
-            v_loss, p_loss, entropy_loss = model.step(**post)
-            loss = p_loss + v_loss
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), kwargs['max_grad_norm'])
-            optimizer.step()
+        loss_record = dict(p_loss=[], v_loss=[], entropy_loss=[], grad_norm=[])
+        for _ in range(kwargs['n_epoch']):
+            minibatch_idxes = torch.split(torch.randperm(kwargs['batch_size']),
+                                          kwargs['batch_size'] // kwargs['n_mini_batch'])
+            for idx in minibatch_idxes:
+                optimizer.zero_grad()
+                v_loss, p_loss, entropy_loss = model.step(
+                    **{k: v[idx] if k != 'hidden_state' else v[:, idx]
+                       for k, v in post.items()})
+                loss = p_loss + v_loss
+                loss.backward()
+                grad_norm = nn.utils.clip_grad_norm_(model.parameters(), kwargs['max_grad_norm'])
+                optimizer.step()
 
-            # record loss
-            loss_record['p_loss'].append(p_loss.item())
-            loss_record['v_loss'].append(v_loss.item())
-            loss_record['entropy_loss'].append(entropy_loss.item())
+                # record loss
+                loss_record['p_loss'].append(p_loss.item())
+                loss_record['v_loss'].append(v_loss.item())
+                loss_record['entropy_loss'].append(entropy_loss.item())
+                loss_record['grad_norm'].append(grad_norm.item())
         optimize_time = time.time() - start
 
         # write summary into TensorBoard
@@ -158,6 +165,7 @@ if __name__ == "__main__":
         writer.add_scalar('loss/p_loss', np.mean(loss_record['p_loss']), global_step=global_step)
         writer.add_scalar('loss/v_loss', np.mean(loss_record['v_loss']), global_step=global_step)
         writer.add_scalar('loss/entropy_loss', np.mean(loss_record['entropy_loss']), global_step=global_step)
+        writer.add_scalar('grad_norm', np.mean(loss_record['grad_norm']), global_step=global_step)
 
         dur = time.time() - iter_start
         print(("Global Step: {}, Frames: {}, Sample Time: {:.2f}s, Optimization Time: {:.2f}s, " +
