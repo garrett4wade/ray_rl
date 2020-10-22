@@ -25,14 +25,15 @@ parser.add_argument("--exp_name", type=str, default='ray_test0', help='experimen
 # environment
 parser.add_argument('--env_name', type=str, default='Humanoid-v2', help='name of env')
 parser.add_argument('--env_num', type=int, default=2, help='number of evironments per worker')
-parser.add_argument('--total_frames', type=int, default=int(5e6), help='optimization batch size')
+parser.add_argument('--total_frames', type=int, default=int(5e6), help='total environment frames')
+parser.add_argument('--total_steps', type=int, default=int(2e3), help='optimization batch size')
 
 # important parameters of model and algorithm
 parser.add_argument('--hidden_dim', type=int, default=64, help='hidden layer size of mlp & gru')
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
 parser.add_argument('--n_epoch', type=int, default=6, help='update epoches in each training step')
 parser.add_argument('--n_mini_batch', type=int, default=4, help='number of minibatches in 1 training epoch')
-parser.add_argument('--lr', type=float, default=7e-4, help='learning rate')
+parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
 parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lamb', type=float, default=0.97, help='gae discount factor')
@@ -140,7 +141,7 @@ if __name__ == "__main__":
     # main loop
     global_step = 0
     num_frames = 0
-    while num_frames < kwargs['total_frames']:
+    while num_frames < kwargs['total_frames'] or global_step < kwargs['total_steps']:
         '''
             sample from buffer
         '''
@@ -201,7 +202,8 @@ if __name__ == "__main__":
         # write summary into TensorBoard
         return_stat = ray.get(return_stat_job)
         for k, v in return_stat.items():
-            writer.add_scalar('ep_return/' + k, v, global_step=num_frames, walltime=time.time() - exp_start_time)
+            writer.add_scalar('ep_return/frames/' + k, v, global_step=num_frames, walltime=time.time() - exp_start_time)
+            writer.add_scalar('ep_return/steps/' + k, v, global_step=global_step, walltime=time.time() - exp_start_time)
         writer.add_scalar('loss/p_loss', np.mean(loss_record['p_loss']), global_step=global_step)
         writer.add_scalar('loss/v_loss', np.mean(loss_record['v_loss']), global_step=global_step)
         writer.add_scalar('loss/entropy_loss', np.mean(loss_record['entropy_loss']), global_step=global_step)
