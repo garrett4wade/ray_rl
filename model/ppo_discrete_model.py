@@ -20,8 +20,9 @@ class DiscreteActorCritic(nn.Module):
         hidden_dim = kwargs['hidden_dim']
 
         self.action_dim = kwargs['action_dim']
-        self.feature_net = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim),
-                                         nn.ReLU())
+        self.feature_net = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.LayerNorm(normalized_shape=[hidden_dim]),
+                                         nn.ReLU(), nn.Linear(hidden_dim, hidden_dim),
+                                         nn.LayerNorm(normalized_shape=[hidden_dim]), nn.ReLU())
         self.rnn = nn.GRU(input_size=hidden_dim, hidden_size=hidden_dim, batch_first=True)
 
         # actor

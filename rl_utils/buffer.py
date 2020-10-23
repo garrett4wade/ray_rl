@@ -30,8 +30,9 @@ class FIFOQueue():
         # random.shuffle(segs)
 
         return {
-            k: np.stack([seg[k] for seg in segs], axis=0) if
-            k != 'hidden_state' else np.stack([seg[k] for seg in segs], axis=1)
+            k:
+            np.stack([seg[k]
+                      for seg in segs], axis=0) if k != 'hidden_state' else np.stack([seg[k] for seg in segs], axis=1)
             for k in self.keys
         }
 
@@ -65,8 +66,45 @@ class ReplayQueue():
         random.shuffle(segs)
 
         return {
-            k: np.stack([seg[k] for seg in segs], axis=0) if
-            k != 'hidden_state' else np.stack([seg[k] for seg in segs], axis=1)
+            k:
+            np.stack([seg[k]
+                      for seg in segs], axis=0) if k != 'hidden_state' else np.stack([seg[k] for seg in segs], axis=1)
+            for k in self.keys
+        }
+
+
+class AuxReplayQueue():
+    def __init__(self, size, keys):
+        self._storage = []
+        self._maxsize = int(size)
+        self._next_idx = 0
+        self.keys = keys
+
+    def size(self):
+        return len(self._storage)
+
+    def __len__(self):
+        return len(self._storage)
+
+    def put(self, seg):
+        if self._next_idx >= len(self._storage):
+            self._storage.append(seg)
+        else:
+            self._storage[self._next_idx] = seg
+        self._next_idx = (self._next_idx + 1) % self._maxsize
+
+    def get(self, batch_size):
+        assert batch_size == self.size()
+        if self.size() < batch_size:
+            return None
+        idxes = np.random.choice(self.size(), batch_size, replace=False)
+        idxes = sorted(idxes, reverse=True)
+        segs = [self._storage.pop(i) for i in idxes]
+        random.shuffle(segs)
+
+        return {
+            k: np.concatenate([seg[k] for seg in segs], axis=0)
+            if k != 'hidden_state' else np.concatenate([seg[k] for seg in segs], axis=1)
             for k in self.keys
         }
 
@@ -98,8 +136,9 @@ class ReplayBuffer():
         segs = [self._storage[i] for i in idxes]
 
         return {
-            k: np.stack([seg[k] for seg in segs], axis=0) if
-            k != 'hidden_state' else np.stack([seg[k] for seg in segs], axis=1)
+            k:
+            np.stack([seg[k]
+                      for seg in segs], axis=0) if k != 'hidden_state' else np.stack([seg[k] for seg in segs], axis=1)
             for k in self.keys
         }
 
@@ -140,10 +179,7 @@ class PrioritizedReplayBuffer():
         if self.size() <= batch_size:
             return None
         total_priorities = np.sum(self._prioritization)
-        idxes = np.random.choice(self.size(),
-                                 batch_size,
-                                 replace=False,
-                                 p=self._prioritization / total_priorities)
+        idxes = np.random.choice(self.size(), batch_size, replace=False, p=self._prioritization / total_priorities)
         idxes = sorted(idxes, reverse=True)
         segs = [self._storage.pop(i) for i in idxes]
         random.shuffle(segs)

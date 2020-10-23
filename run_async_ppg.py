@@ -9,9 +9,9 @@ import numpy as np
 import torch.optim as optim
 
 from rl_utils.env import Envs
-from rl_utils.buffer import ReplayQueue
-from model.ppo_continuous_model import ContinuousActorCritic
-from model.ppo_discrete_model import DiscreteActorCritic
+from rl_utils.buffer import ReplayQueue, AuxReplayQueue
+from model.ppg_continuous_model import ContinuousActorCritic
+from model.ppg_discrete_model import DiscreteActorCritic
 from gym.spaces.box import Box
 from gym.spaces.discrete import Discrete
 from torch.utils.tensorboard import SummaryWriter
@@ -25,13 +25,15 @@ parser.add_argument("--exp_name", type=str, default='ray_test0', help='experimen
 # environment
 parser.add_argument('--env_name', type=str, default='Humanoid-v2', help='name of env')
 parser.add_argument('--env_num', type=int, default=2, help='number of evironments per worker')
-parser.add_argument('--total_frames', type=int, default=int(5e6), help='total environment frames')
+parser.add_argument('--total_frames', type=int, default=int(10e6), help='total environment frames')
 parser.add_argument('--total_steps', type=int, default=int(2e3), help='optimization batch size')
 
 # important parameters of model and algorithm
 parser.add_argument('--hidden_dim', type=int, default=64, help='hidden layer size of mlp & gru')
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
-parser.add_argument('--n_epoch', type=int, default=6, help='update epoches in each training step')
+parser.add_argument('--aux_interval', type=int, default=16, help='auxilary phase interval')
+parser.add_argument('--n_epoch_policy', type=int, default=1, help='update epoches in policy phase')
+parser.add_argument('--n_epoch_aux', type=int, default=9, help='update epoches in auxilary phase')
 parser.add_argument('--n_mini_batch', type=int, default=4, help='number of minibatches in 1 training epoch')
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
@@ -125,6 +127,9 @@ if __name__ == "__main__":
     keys = ['state', 'action', 'action_logits', 'value', 'reward', 'hidden_state', 'done_mask']
     buffer = ReplayQueue(kwargs['batch_size'] * kwargs['q_size'], keys)
 
+    aux_keys = ['state', 'hidden_state', 'value']
+    aux_buffer = AuxReplayQueue(kwargs['aux_interval'], aux_keys)
+
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
     recorder = ReturnRecorder.remote()
@@ -151,9 +156,9 @@ if __name__ == "__main__":
         while data_batch is None:
             data_batch = buffer.get(kwargs['batch_size'])
         sample_time = time.time() - iter_start
-        '''
-            split data for burn-in and backpropogation
-        '''
+
+        # policy phase
+        # split data for burn-in and backpropogation
         pre, post = dict(), dict()
         for k, v in data_batch.items():
             if k == 'hidden_state':
@@ -171,28 +176,70 @@ if __name__ == "__main__":
         start = time.time()
         # burn-in stage: compute RNN hidden state for loss computation
         state, hidden_state = pre['state'], pre['hidden_state']
-        post['hidden_state'] = learner.step(state, hidden_state, burn_in=True)
+        post['hidden_state'] = learner.step(state, hidden_state, phase='burn_in')
         # training loop: compute loss and backpropogate gradient update
-        loss_record = dict(p_loss=[], v_loss=[], entropy_loss=[], grad_norm=[])
-        for _ in range(kwargs['n_epoch']):
+        policy_loss_record = dict(p_loss=[], v_loss=[], entropy_loss=[], grad_norm=[])
+        for _ in range(kwargs['n_epoch_policy']):
             minibatch_idxes = torch.split(torch.randperm(kwargs['batch_size']),
                                           kwargs['batch_size'] // kwargs['n_mini_batch'])
             for idx in minibatch_idxes:
                 optimizer.zero_grad()
                 v_loss, p_loss, entropy_loss = learner.step(
-                    **{k: v[idx] if k != 'hidden_state' else v[:, idx]
-                       for k, v in post.items()})
+                    phase='policy', **{k: v[idx] if k != 'hidden_state' else v[:, idx]
+                                       for k, v in post.items()})
                 loss = p_loss + v_loss
                 loss.backward()
                 grad_norm = nn.utils.clip_grad_norm_(learner.parameters(), kwargs['max_grad_norm'])
                 optimizer.step()
 
                 # record loss
-                loss_record['p_loss'].append(p_loss.item())
-                loss_record['v_loss'].append(v_loss.item())
-                loss_record['entropy_loss'].append(entropy_loss.item())
-                loss_record['grad_norm'].append(grad_norm.item())
-        optimize_time = time.time() - start
+                policy_loss_record['p_loss'].append(p_loss.item())
+                policy_loss_record['v_loss'].append(v_loss.item())
+                policy_loss_record['entropy_loss'].append(entropy_loss.item())
+                policy_loss_record['grad_norm'].append(grad_norm.item())
+
+        # store into auxilary buffer
+        v_target = learner.step(**post, phase='value')
+        aux_seg = dict(state=data_batch['state'], hidden_state=data_batch['hidden_state'], value=v_target)
+        aux_buffer.put(aux_seg)
+        policy_phase_time = time.time() - start
+
+        # auxilary phase
+        start = time.time()
+        if global_step % kwargs['aux_interval'] == 0:
+            aux_data_batch = aux_buffer.get(kwargs['aux_interval'])
+            # auxilary phase burn-in
+            pre, post = dict(), dict()
+            for k, v in aux_data_batch.items():
+                if k == 'hidden_state':
+                    pre[k] = v
+                elif k != 'value':
+                    # target value has length of 'chunk_len'
+                    pre[k], post[k] = np.split(v, [kwargs['burn_in_len']], axis=1)
+            state, hidden_state = pre['state'], pre['hidden_state']
+            post['hidden_state'] = learner.step(state, hidden_state, phase='burn_in')
+            # prepare data needed in auxilary phase update
+            post['action_logits'] = learner.step(phase='action_logits', **post)
+            post['value'] = aux_data_batch['value']
+            # auxilary phase update
+            aux_loss_record = dict(p_loss=[], v_loss=[], grad_norm=[])
+            for _ in range(kwargs['n_epoch_aux']):
+                minibatch_idxes = torch.split(torch.randperm(kwargs['batch_size']),
+                                              kwargs['batch_size'] // kwargs['n_mini_batch'])
+                for idx in minibatch_idxes:
+                    optimizer.zero_grad()
+                    aux_p_loss, aux_v_loss = learner.step(
+                        phase='aux', **{k: v[idx] if k != 'hidden_state' else v[:, idx]
+                                        for k, v in post.items()})
+                    (aux_p_loss + aux_v_loss).backward()
+                    aux_grad_norm = torch.nn.utils.clip_grad_norm_(learner.parameters(), kwargs['max_grad_norm'])
+                    optimizer.step()
+
+                    # record auxilary phase losses
+                    aux_loss_record['p_loss'].append(aux_p_loss.item())
+                    aux_loss_record['v_loss'].append(aux_v_loss.item())
+                    aux_loss_record['grad_norm'].append(aux_grad_norm.item())
+        auxilary_phase_time = time.time() - start
 
         # upload updated learner parameter to parameter server
         if global_step % kwargs['push_period'] == 0:
@@ -204,12 +251,16 @@ if __name__ == "__main__":
         for k, v in return_stat.items():
             writer.add_scalar('ep_return/frames/' + k, v, global_step=num_frames, walltime=time.time() - exp_start_time)
             writer.add_scalar('ep_return/steps/' + k, v, global_step=global_step, walltime=time.time() - exp_start_time)
-        for k, v in loss_record.items():
+        for k, v in policy_loss_record.items():
             writer.add_scalar('policy_phase/' + k, np.mean(v), global_step=global_step)
+        if global_step % kwargs['aux_interval'] == 0:
+            for k, v in aux_loss_record.items():
+                writer.add_scalar('auxilary_phase/' + k, np.mean(v), global_step=global_step)
 
         dur = time.time() - iter_start
-        print(("Global Step: {}, Frames: {}, " + "Sample Time: {:.2f}s, Optimization Time: {:.2f}s, " +
-               "Iteration Step Time: {:.2f}s").format(global_step, num_frames, sample_time, optimize_time, dur))
+        print(("Global Step: {}, Frames: {}, Sample Time: {:.2f}s, " +
+               "Policy Phase Time: {:.2f}s, Auxilary Phase Time: {:.2f}s, Iteration Step Time: {:.2f}s").format(
+                   global_step, num_frames, sample_time, policy_phase_time, auxilary_phase_time, dur))
     print("############ prepare to shut down ray ############")
     ray.shutdown()
     writer.close()
