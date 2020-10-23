@@ -1,12 +1,16 @@
 import torch.nn as nn
 import torch
 
-from torch.distributions import Categorical
-from vtrace import from_importance_weights as vtrace_from_importance_weights
-from gae import from_rewards as gae_from_rewards
+from torch.distributions import Normal
+from module.vtrace import from_importance_weights as vtrace_from_importance_weights
+from module.gae import from_rewards as gae_from_rewards
+
+# borrowed from soft-actor-critic
+LOG_STD_MAX = 2
+LOG_STD_MIN = -20
 
 
-class DiscreteActorCritic(nn.Module):
+class ContinuousActorCritic(nn.Module):
     def __init__(self, is_training, kwargs):
         super().__init__()
         self.is_training = is_training
@@ -14,6 +18,11 @@ class DiscreteActorCritic(nn.Module):
             self.device = torch.device('cpu')
         else:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        action_scale = torch.from_numpy(kwargs['action_scale'].copy())
+        action_loc = torch.from_numpy(kwargs['action_loc'].copy())
+        self.action_scale = nn.Parameter(action_scale).detach().to(self.device)
+        self.action_loc = nn.Parameter(action_loc).detach().to(self.device)
 
         state_dim = kwargs['state_dim']
         action_dim = kwargs['action_dim']
@@ -25,7 +34,7 @@ class DiscreteActorCritic(nn.Module):
         self.rnn = nn.GRU(input_size=hidden_dim, hidden_size=hidden_dim, batch_first=True)
 
         # actor
-        self.action_layer = nn.Linear(hidden_dim, action_dim)
+        self.action_layer = nn.Linear(hidden_dim, 2 * action_dim)
 
         # critic
         self.value_layer = nn.Linear(hidden_dim, 1)
@@ -46,7 +55,10 @@ class DiscreteActorCritic(nn.Module):
         action_logits = self.action_layer(x)
         value = self.value_layer(x).squeeze(-1)
 
-        dist = Categorical(logits=action_logits)
+        mu, log_std = torch.split(action_logits, self.action_dim, dim=-1)
+        log_std = log_std.clamp(LOG_STD_MIN, LOG_STD_MAX)
+        mu = torch.tanh(mu) * self.action_scale + self.action_loc
+        dist = Normal(loc=mu, scale=log_std.exp())
 
         action = dist.sample()
 
@@ -106,7 +118,6 @@ class DiscreteActorCritic(nn.Module):
                 item = torch.from_numpy(item)
             inputs[i] = item.to(device=self.device, dtype=torch.float)
         (action, reward, action_logits, value, done_mask) = inputs
-        action = action.to(torch.long)
 
         # all following code is for loss computation
         (_, target_action_logits, cur_state_value, _) = self(state, hidden_state)
@@ -116,10 +127,17 @@ class DiscreteActorCritic(nn.Module):
         cur_state_value = cur_state_value * done_mask
         value = value * done_mask
 
-        target_dist = Categorical(logits=target_action_logits)
-        target_action_logprobs = target_dist.log_prob(action)
-        behavior_dist = Categorical(logits=action_logits)
-        behavior_action_logprobs = behavior_dist.log_prob(action)
+        target_mu, target_log_std = torch.split(target_action_logits, self.action_dim, dim=-1)
+        target_mu = torch.tanh(target_mu) * self.action_scale + self.action_loc
+        target_log_std = target_log_std.clamp(LOG_STD_MIN, LOG_STD_MAX)
+        target_dist = Normal(target_mu, target_log_std.exp())
+        target_action_logprobs = target_dist.log_prob(action).sum(-1)
+
+        mu, log_std = torch.split(action_logits, self.action_dim, dim=-1)
+        mu = torch.tanh(mu) * self.action_scale + self.action_loc
+        log_std = log_std.clamp(LOG_STD_MIN, LOG_STD_MAX)
+        behavior_dist = Normal(mu, log_std.exp())
+        behavior_action_logprobs = behavior_dist.log_prob(action).sum(-1)
 
         log_rhos = target_action_logprobs - behavior_action_logprobs.detach()
         rhos = log_rhos.exp()
@@ -158,6 +176,7 @@ class DiscreteActorCritic(nn.Module):
         v_loss = (v_loss * done_mask[:, :-1]).mean()
 
         entropy_loss = -target_dist.entropy()
+        entropy_loss = entropy_loss.sum(-1)
         entropy_loss = (entropy_loss[:, :-1] * done_mask[:, :-1]).mean()
         return v_loss, p_loss, entropy_loss
 

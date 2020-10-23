@@ -8,15 +8,15 @@ import argparse
 import numpy as np
 import torch.optim as optim
 
-from env import Envs
-from buffer import ReplayQueue
-from continuous_model import ContinuousActorCritic
-from discrete_model import DiscreteActorCritic
+from rl_utils.env import Envs
+from rl_utils.buffer import ReplayQueue
+from model.ppo_continuous_model import ContinuousActorCritic
+from model.ppo_discrete_model import DiscreteActorCritic
 from gym.spaces.box import Box
 from gym.spaces.discrete import Discrete
 from torch.utils.tensorboard import SummaryWriter
-from ps import ParameterServer, ReturnRecorder
-from simulation_thread import SimulationThread
+from ray_utils.ps import ParameterServer, ReturnRecorder
+from ray_utils.simulation_thread import SimulationThread
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
