@@ -22,7 +22,7 @@ parser.add_argument("--exp_name", type=str, default='ray_test0', help='experimen
 # environment
 parser.add_argument('--env_name', type=str, default='Humanoid-v2', help='name of env')
 parser.add_argument('--env_num', type=int, default=2, help='number of evironments per worker')
-parser.add_argument('--total_frames', type=int, default=int(10e6), help='total environment frames')
+parser.add_argument('--total_frames', type=int, default=int(5e6), help='total environment frames')
 parser.add_argument('--total_steps', type=int, default=int(2e3), help='optimization batch size')
 
 # important parameters of model and algorithm
@@ -36,6 +36,7 @@ parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lamb', type=float, default=0.97, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
 parser.add_argument('--max_grad_norm', type=float, default=40.0, help='maximum gradient norm')
+parser.add_argument('--use_vtrace', type=bool, default=False, help='maximum gradient norm')
 
 # recurrent model parameters
 parser.add_argument('--burn_in_len', type=int, default=20, help='rnn hidden state burn-in length')

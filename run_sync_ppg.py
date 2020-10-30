@@ -38,6 +38,7 @@ parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lamb', type=float, default=0.97, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
 parser.add_argument('--max_grad_norm', type=float, default=40.0, help='maximum gradient norm')
+parser.add_argument('--use_vtrace', type=bool, default=False, help='maximum gradient norm')
 
 # recurrent model parameters
 parser.add_argument('--burn_in_len', type=int, default=20, help='rnn hidden state burn-in length')

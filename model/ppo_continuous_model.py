@@ -149,7 +149,7 @@ class ContinuousActorCritic(nn.Module):
             ''' vtrace '''
             vtrace_returns = vtrace_from_importance_weights(log_rhos=log_rhos.detach()[:, :-1],
                                                             discounts=self.gamma *
-                                                            torch.zeros_like(reward[:, :-1], dtype=torch.float),
+                                                            torch.ones_like(reward[:, :-1], dtype=torch.float),
                                                             rewards=reward[:, :-1],
                                                             values=cur_state_value[:, :-1],
                                                             bootstrap_value=cur_state_value[:, -1])

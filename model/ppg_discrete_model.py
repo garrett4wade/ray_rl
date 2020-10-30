@@ -35,6 +35,7 @@ class DiscreteActorCritic(nn.Module):
         self.gamma = kwargs['gamma']
         self.lamb = kwargs['lamb']
         self.clip_ratio = kwargs['clip_ratio']
+        self.use_vtrace = kwargs['use_vtrace']
 
         self.to(self.device)
 
@@ -61,8 +62,7 @@ class DiscreteActorCritic(nn.Module):
                                   reward,
                                   done_mask,
                                   action_logits,
-                                  value,
-                                  use_vtrace=False):
+                                  value):
         # convert remaining input to PyTorch tensors
         inputs = [action, reward, action_logits, value, done_mask]
         for i, item in enumerate(inputs):
@@ -92,7 +92,7 @@ class DiscreteActorCritic(nn.Module):
         '''
             NOTE input padding 0 from sequence end doesn't affect vtrace
         '''
-        if use_vtrace:
+        if self.use_vtrace:
             ''' vtrace '''
             vtrace_returns = vtrace_from_importance_weights(log_rhos=log_rhos.detach()[:, :-1],
                                                             discounts=self.gamma *
@@ -155,8 +155,7 @@ class DiscreteActorCritic(nn.Module):
                              reward,
                              done_mask,
                              action_logits,
-                             value,
-                             use_vtrace=False):
+                             value):
         # convert remaining input to PyTorch tensors
         inputs = [action, reward, action_logits, value, done_mask]
         for i, item in enumerate(inputs):
@@ -174,7 +173,7 @@ class DiscreteActorCritic(nn.Module):
         '''
         cur_state_value = cur_state_value * done_mask
         value = value * done_mask
-        if use_vtrace:
+        if self.use_vtrace:
             target_action_logits = self.action_layer(x)
 
             target_dist = Categorical(logits=target_action_logits)
