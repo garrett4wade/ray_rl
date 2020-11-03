@@ -2,11 +2,11 @@ import torch.nn as nn
 import torch
 
 from torch.distributions import Categorical
-from vtrace import from_importance_weights as vtrace_from_importance_weights
-from gae import from_rewards as gae_from_rewards
+from module.vtrace import from_importance_weights as vtrace_from_importance_weights
+from module.gae import from_rewards as gae_from_rewards
 
 
-class DiscreteActorCritic(nn.Module):
+class ActorCritic(nn.Module):
     def __init__(self, is_training, kwargs):
         super().__init__()
         self.is_training = is_training
@@ -15,14 +15,13 @@ class DiscreteActorCritic(nn.Module):
         else:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-        state_dim = kwargs['state_dim']
-        action_dim = kwargs['action_dim']
-        hidden_dim = kwargs['hidden_dim']
-
-        self.action_dim = kwargs['action_dim']
-        self.feature_net = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim),
-                                         nn.ReLU())
-        self.rnn = nn.GRU(input_size=hidden_dim, hidden_size=hidden_dim, batch_first=True)
+        self.action_dim = action_dim = kwargs['action_dim']
+        self.hidden_dim = hidden_dim = kwargs['hidden_dim']
+        
+        # default convolutional model in rllib
+        self.feature_net = nn.Sequential(nn.ZeroPad2d((2, 2, 2, 2)), nn.Conv2d(4, 16, kernel_size=8, stride=4), nn.ReLU(),
+                                         nn.ZeroPad2d((1, 2, 1, 2)), nn.Conv2d(16, 32, kernel_size=4, stride=2), nn.ReLU(), 
+                                         nn.Conv2d(32, hidden_dim, kernel_size=11, stride=1), nn.ReLU(), nn.Flatten())
 
         # actor
         self.action_layer = nn.Linear(hidden_dim, action_dim)
@@ -34,15 +33,22 @@ class DiscreteActorCritic(nn.Module):
         self.lamb = kwargs['lamb']
         self.clip_ratio = kwargs['clip_ratio']
 
+        self.use_vtrace = kwargs['use_vtrace']
+
         self.to(self.device)
 
-    def core(self, state, hidden_state):
-        x = self.feature_net(state)
-        feature, hidden_state_out = self.rnn(x, hidden_state)
-        return feature, hidden_state_out
+    def core(self, state):
+        assert torch.all((state>=-1).logical_and(state<=1))
+        if not self.is_training:
+            assert state.ndim == 4
+            return self.feature_net(state)
+        else:
+            assert state.ndim == 5
+            batch_size, t_dim = state.shape[:2]
+            return self.feature_net(state.view(batch_size * t_dim, *state.shape[2:])).reshape(batch_size, t_dim, self.hidden_dim)
 
-    def forward(self, state, hidden_state):
-        x, hidden_state_out = self.core(state, hidden_state)
+    def forward(self, state):
+        x = self.core(state)
         action_logits = self.action_layer(x)
         value = self.value_layer(x).squeeze(-1)
 
@@ -50,54 +56,24 @@ class DiscreteActorCritic(nn.Module):
 
         action = dist.sample()
 
-        return (action, action_logits, value, hidden_state_out)
+        return action, action_logits, value
 
     def step(self,
              state,
-             hidden_state,
              action=None,
              reward=None,
              done_mask=None,
              action_logits=None,
-             value=None,
-             burn_in=False,
-             use_vtrace=False):
-        '''
-            the only function needs to be invoked for all workers and learners
-
-            There may be 3 scenarios:
-            1. For workers, invoke model.step(s, h) to get action,
-               and store (logprobs, state_values, hidden_states)
-            2. For leanrer burn-in, feed hidden_state to get hidden_state_out
-               (similar as R2D2)
-            3. For learner loss computation, need to in addition feed
-               (action, reward, done_mask, action_logits, value)
-
-            Shapes of inputs in each scenario (except hidden_state):
-            1. env simulation with shape (env_num, 1, *)
-            2. burn-in with shape (batch_size, burn_in_len, *)
-            3. loss computation with shape (batch_size, chunk_len + 1, *)
-
-            NOTE: hidden_state with shape (1, batch_size, hidden_size)
-            NOTE: loss computation has 1 more time length for value bootstrap
-        '''
+             value=None):
         # convert input to PyTorch tensors
-        inputs = [state, hidden_state]
-        for i, item in enumerate(inputs):
-            if not torch.is_tensor(item):
-                item = torch.from_numpy(item)
-            inputs[i] = item.to(device=self.device, dtype=torch.float)
-        state, hidden_state = inputs
+        if not torch.is_tensor(state):
+            state = torch.from_numpy(state)
+        state = state.to(device=self.device, dtype=torch.float)
 
-        if not self.is_training or burn_in:
+        if not self.is_training:
             with torch.no_grad():
-                results = self(state, hidden_state)
-            # when worker invoke model.step
-            if not self.is_training:
+                results = self(state)
                 return [result.detach().cpu().numpy() for result in results]
-            # when compute rnn hidden state in burn-in stage before loss computation
-            else:
-                return results[-1].detach()
 
         # convert remaining input to PyTorch tensors
         inputs = [action, reward, action_logits, value, done_mask]
@@ -109,7 +85,7 @@ class DiscreteActorCritic(nn.Module):
         action = action.to(torch.long)
 
         # all following code is for loss computation
-        (_, target_action_logits, cur_state_value, _) = self(state, hidden_state)
+        _, target_action_logits, cur_state_value = self(state)
         '''
             NOTE done_mask can remove values calculated from padding 0
         '''
@@ -126,11 +102,11 @@ class DiscreteActorCritic(nn.Module):
         '''
             NOTE input padding 0 from sequence end doesn't affect vtrace
         '''
-        if use_vtrace:
+        if self.use_vtrace:
             ''' vtrace '''
             vtrace_returns = vtrace_from_importance_weights(log_rhos=log_rhos.detach()[:, :-1],
                                                             discounts=self.gamma *
-                                                            torch.zeros_like(reward[:, :-1], dtype=torch.float),
+                                                            torch.ones_like(reward[:, :-1], dtype=torch.float),
                                                             rewards=reward[:, :-1],
                                                             values=cur_state_value[:, :-1],
                                                             bootstrap_value=cur_state_value[:, -1])

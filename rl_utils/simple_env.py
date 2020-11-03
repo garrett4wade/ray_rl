@@ -4,7 +4,7 @@ from gym.spaces.box import Box
 from gym.spaces.discrete import Discrete
 
 # Seg is a tuple that gathers all kinds of data we need
-Seg = namedtuple("Seg", ['state', 'action', 'action_logits', 'value', 'reward', 'hidden_state', 'done_mask'])
+Seg = namedtuple("Seg", ['state', 'action', 'action_logits', 'value', 'reward', 'done_mask'])
 
 
 class Env:
@@ -29,16 +29,16 @@ class Env:
             self.is_continuous = True
         elif isinstance(self.env.action_space, Discrete):
             self.is_continuous = False
+        assert not self.is_continuous, "this branch is for Atari game, environment action space must be discrete"
 
         # basic network parameters
         self.state_dim = kwargs['state_dim']
         self.action_dim = kwargs['action_dim']
-        self.n_latent_var = kwargs['hidden_dim']
 
         # for recurrent network training, hyperparameters of sequece data
-        self.burn_in_len = kwargs['burn_in_len']
+        self.burn_in_len = 0
         self.chunk_len = kwargs['chunk_len']
-        self.replay = kwargs['replay']
+        self.replay = 1
         self.max_timesteps = kwargs['max_timesteps']
 
         # parameters that decide how much data we need before collecting them
@@ -55,7 +55,7 @@ class Env:
     def reset(self):
         if self.done:
             print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
-        self.state = self.env.reset()
+        self.state = self.preprocess_state(self.env.reset())
         self.done = False
         self.ep_return = 0
         self.ep_step = 0
@@ -69,25 +69,17 @@ class Env:
         self.done_mask.append(1)
 
     def reset_history(self):
-        self.state_history = [np.zeros(self.state_dim, dtype=np.float)] * self.burn_in_len
-        if self.is_continuous:
-            # for continuous env, action is an real value array
-            self.action_history = [np.zeros(self.action_dim, dtype=np.float)] * self.burn_in_len
-            self.action_logits_history = [np.zeros(self.action_dim * 2, dtype=np.float)] * self.burn_in_len
-        else:
-            # for discrete env, action is an integer number
-            self.action_history = [0] * self.burn_in_len
-            self.action_logits_history = [np.zeros(self.action_dim, dtype=np.float)] * self.burn_in_len
+        self.state_history = [np.zeros(self.state_dim, dtype=np.float32)] * self.burn_in_len
+        # for discrete env, action is an integer number
+        self.action_history = [0] * self.burn_in_len
+        self.action_logits_history = [np.zeros(self.action_dim, dtype=np.float32)] * self.burn_in_len
         self.reward_history = [0] * self.burn_in_len
         self.done_mask = [0] * self.burn_in_len
         self.value_history = [0] * self.burn_in_len
-        '''
-            NOTE hidden state omit axis 1 (batch axis)
-        '''
-        self.hidden_state_history = [np.zeros((1, self.n_latent_var), dtype=np.float)] * (self.burn_in_len + 1)
 
-    def step(self, action, action_logits, value, hidden_state):
+    def step(self, action, action_logits, value):
         nex_state, r, d, _ = self.env.step(action)
+        nex_state = self.preprocess_state(nex_state)
 
         self.ep_return += r
         self.ep_step += 1
@@ -102,7 +94,6 @@ class Env:
 
         self.state_history.append(nex_state)
         self.done_mask.append(0 if self.done else 1)
-        self.hidden_state_history.append(hidden_state)
 
         segs = self.collect()
         ep_return = None
@@ -124,13 +115,12 @@ class Env:
         if self.done:
             seg = Seg(np.stack(self.state_history, axis=0), np.stack(self.action_history, axis=0),
                       np.stack(self.action_logits_history, axis=0), np.stack(self.value_history, axis=0),
-                      np.stack(self.reward_history, axis=0), np.stack(self.hidden_state_history, axis=0),
-                      np.stack(self.done_mask, axis=0))
+                      np.stack(self.reward_history, axis=0), np.stack(self.done_mask, axis=0))
         elif len(self.value_history) >= cut_len:
             seg = Seg(np.stack(self.state_history[:cut_len], axis=0), np.stack(self.action_history[:cut_len], axis=0),
                       np.stack(self.action_logits_history[:cut_len], axis=0),
                       np.stack(self.value_history[:cut_len], axis=0), np.stack(self.reward_history[:cut_len], axis=0),
-                      np.stack(self.hidden_state_history[:cut_len], axis=0), np.stack(self.done_mask[:cut_len], axis=0))
+                      np.stack(self.done_mask[:cut_len], axis=0))
 
             cut_off = k * step_size
             self.state_history = self.state_history[cut_off:]
@@ -138,7 +128,6 @@ class Env:
             self.action_logits_history = self.action_logits_history[cut_off:]
             self.value_history = self.value_history[cut_off:]
             self.reward_history = self.reward_history[cut_off:]
-            self.hidden_state_history = self.hidden_state_history[cut_off:]
             self.done_mask = self.done_mask[cut_off:]
 
         if seg is None:
@@ -155,24 +144,22 @@ class Env:
                 NOTE need to ensure first dim is time dimension
             '''
             sequence = [s[:target_len] for s in seg]
-            keys = ['state', 'action', 'action_logits', 'value', 'reward', 'hidden_state', 'done_mask']
+            keys = ['state', 'action', 'action_logits', 'value', 'reward', 'done_mask']
             seg_dict = dict()
             for i, s in enumerate(sequence):
                 key = keys[i]
-                if key == 'hidden_state':
-                    seg_dict[key] = s[0]
-                else:
-                    pad = tuple([(0, target_len - s.shape[0])] + [(0, 0)] * (s.ndim - 1))
-                    seg_dict[key] = np.pad(s, pad, 'constant', constant_values=0)
+                pad = tuple([(0, target_len - s.shape[0])] + [(0, 0)] * (s.ndim - 1))
+                seg_dict[key] = np.pad(s, pad, 'constant', constant_values=0)
             results.append(seg_dict)
             seg = Seg(*[s[step_size:] for s in seg])
         return results
 
     def get_state(self):
         return self.state
-
-    def get_hidden_state(self):
-        return self.hidden_state_history[-1]
+    
+    def preprocess_state(self, state):
+        state = np.transpose(state, [2, 0, 1]).astype(np.float32)
+        return (state - 128.0) / 128.0
 
 
 class Envs:
@@ -180,18 +167,11 @@ class Envs:
         self.envs = [Env(env_fn, kwargs) for _ in range(kwargs['env_num'])]
 
     def step(self, model):
-        inputs = self.get_model_inputs()
-        actions, action_logits, values, hidden_states = model.step(*inputs)
-        '''
-            remove time sequence dim
-        '''
-        actions = np.squeeze(actions, axis=1)
-        action_logits = np.squeeze(action_logits, axis=1)
-        values = np.squeeze(values, axis=1)
+        actions, action_logits, values = model.step(self.get_model_inputs())
 
         segs, ep_returns = [], []
         for i, env in enumerate(self.envs):
-            cur_segs, cur_ep_return = env.step(actions[i], action_logits[i], values[i], hidden_states[:, i, :])
+            cur_segs, cur_ep_return = env.step(actions[i], action_logits[i], values[i])
             if len(cur_segs) > 0:
                 segs += cur_segs
             if cur_ep_return is not None:
@@ -199,7 +179,4 @@ class Envs:
         return segs, ep_returns
 
     def get_model_inputs(self):
-        # for recurrent model, add additional time sequence dim
-        state = np.expand_dims(np.stack([env.get_state() for env in self.envs], axis=0), axis=1)
-        hidden_state = np.stack([env.get_hidden_state() for env in self.envs], axis=1)
-        return [state, hidden_state]
+        return np.stack([env.get_state() for env in self.envs], axis=0)
