@@ -29,7 +29,7 @@ parser.add_argument('--total_frames', type=int, default=int(10e6), help='total e
 parser.add_argument('--total_steps', type=int, default=int(2e3), help='optimization batch size')
 
 # important parameters of model and algorithm
-parser.add_argument('--hidden_dim', type=int, default=64, help='hidden layer size of mlp & gru')
+parser.add_argument('--hidden_dim', type=int, default=128, help='hidden layer size of mlp & gru')
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
 parser.add_argument('--aux_interval', type=int, default=16, help='auxilary phase interval')
 parser.add_argument('--n_epoch_policy', type=int, default=1, help='update epoches in policy phase')
@@ -37,7 +37,7 @@ parser.add_argument('--n_epoch_aux', type=int, default=9, help='update epoches i
 parser.add_argument('--n_mini_batch', type=int, default=4, help='number of minibatches in 1 training epoch')
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
-parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
+parser.add_argument('--gamma', type=float, default=0.997, help='discount factor')
 parser.add_argument('--lamb', type=float, default=0.97, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
 parser.add_argument('--max_grad_norm', type=float, default=40.0, help='maximum gradient norm')
@@ -52,8 +52,8 @@ parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal
 
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
-parser.add_argument('--load_period', type=int, default=50, help='load period from parameter server')
-parser.add_argument('--num_workers', type=int, default=6, help='remote worker numbers')
+parser.add_argument('--load_period', type=int, default=25, help='load period from parameter server')
+parser.add_argument('--num_workers', type=int, default=12, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=2, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
 parser.add_argument('--q_size', type=int, default=4, help='number of batches in replay buffer')
@@ -226,7 +226,7 @@ if __name__ == "__main__":
             aux_loss_record = dict(p_loss=[], v_loss=[], grad_norm=[])
             for _ in range(kwargs['n_epoch_aux']):
                 minibatch_idxes = torch.split(torch.randperm(kwargs['batch_size']),
-                                              kwargs['batch_size'] // kwargs['n_mini_batch'])
+                                              kwargs['aux_interval'] * kwargs['batch_size'] // kwargs['n_mini_batch'])
                 for idx in minibatch_idxes:
                     optimizer.zero_grad()
                     aux_p_loss, aux_v_loss = learner.step(
