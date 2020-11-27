@@ -4,8 +4,8 @@ from collections import namedtuple
 from gym.spaces.box import Box
 from gym.spaces.discrete import Discrete
 
-ROLLOUT_KEYS = ['obs', 'act', 'act_logits', 'value', 'reward']
-COLLECT_KEYS = ['obs', 'act', 'act_logits', 'value', 'adv', 'value_target']
+ROLLOUT_KEYS = ['obs', 'action', 'action_logits', 'value', 'reward']
+COLLECT_KEYS = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
 
 
 class Env:
@@ -20,6 +20,7 @@ class Env:
 
         self.gamma = kwargs['gamma']
         self.lmbda = kwargs['lmbda']
+        self.max_timesteps = kwargs['max_timesteps']
         self.done = False
         self.ep_step = self.ep_return = 0
         self.reset()
@@ -37,7 +38,7 @@ class Env:
         for k in ROLLOUT_KEYS:
             self.history[k] = []
 
-    def step(self, act, act_logits, value, model):
+    def step(self, action, action_logits, value, model):
         n_obs, r, d, _ = self.env.step(action)
         n_obs = self.preprocess_obs(n_obs)
 
@@ -45,8 +46,8 @@ class Env:
         self.ep_step += 1
 
         self.history['obs'].append(self.obs)
-        self.history['act'].append(act)
-        self.history['act_logits'].append(act_logits)
+        self.history['action'].append(action)
+        self.history['action_logits'].append(action_logits)
         self.history['reward'].append(r)
         self.history['value'].append(value)
 
@@ -81,7 +82,7 @@ class Env:
     def compute_gae(self, bootstrap_value):
         discounted_r = lfilter([1], [1, -self.gamma], self.history['reward'][::-1])[::-1]
         episode_length = len(self.history['reward'])
-        n_step_v = discounted_r + bootstrap_value * gamma**np.arange(episode_length, 0, -1)
+        n_step_v = discounted_r + bootstrap_value * self.gamma**np.arange(episode_length, 0, -1)
         td_err = n_step_v - np.array(self.history['value'], dtype=np.float32)
         adv = lfilter([1], [1, -self.lmbda], td_err[::-1])[::-1]
         td_lmbda = lfilter([1], [1, -self.lmbda], n_step_v[::-1])[::-1]
@@ -93,7 +94,7 @@ class Envs:
         self.envs = [Env(env_fn, kwargs) for _ in range(kwargs['env_num'])]
 
     def step(self, model):
-        actions, action_logits, values = model.step(self.get_model_inputs())
+        actions, action_logits, values = model.select_action(self.get_model_inputs())
 
         data_batches, ep_returns = [], []
         for i, env in enumerate(self.envs):
@@ -102,7 +103,7 @@ class Envs:
                 data_batches.append(cur_data_batch)
             if cur_ep_return is not None:
                 ep_returns.append(cur_ep_return)
-        return segs, ep_returns
+        return data_batches, ep_returns
 
     def get_model_inputs(self):
         return np.stack([env.obs for env in self.envs], axis=0)

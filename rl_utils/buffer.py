@@ -49,12 +49,17 @@ class ReplayQueue():
     def __len__(self):
         return len(self._storage)
 
-    def put(self, seg):
+    def put_one_seg(self, seg):
         if self._next_idx >= len(self._storage):
             self._storage.append(seg)
         else:
             self._storage[self._next_idx] = seg
         self._next_idx = (self._next_idx + 1) % self._maxsize
+    
+    def put(self, data_batch):
+        batch_size = list(data_batch.values())[0].shape[0]
+        for i in range(batch_size):
+            self.put_one_seg({k:v[i] for k, v in data_batch.items()})
 
     def get(self, batch_size):
         if self.size() <= batch_size:

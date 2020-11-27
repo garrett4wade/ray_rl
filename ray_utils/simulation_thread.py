@@ -83,10 +83,10 @@ class Worker():
                 self.get_new_weights()
             global_step += 1
 
-            segs, ep_returns = self.env.step(self.model)
-            if len(segs) == 0:
+            data_batches, ep_returns = self.env.step(self.model)
+            if len(data_batches) == 0:
                 continue
-            yield (segs, ep_returns)
+            yield (data_batches, ep_returns)
 
     def get(self):
         return next(self._data_g)
@@ -135,10 +135,10 @@ class RolloutCollector():
 
 
 class SimulationThread(Thread):
-    def __init__(self, model_fn, env_fn, ps, recorder, global_queue, kwargs):
+    def __init__(self, model_fn, env_fn, ps, recorder, global_buffer, kwargs):
         super().__init__()
         self.rollout_collector = RolloutCollector(model_fn=model_fn, env_fn=env_fn, ps=ps, kwargs=kwargs)
-        self.global_queue = global_queue
+        self.global_buffer = global_buffer
         self.recorder = recorder
         self.ready_id_queue = Queue(maxsize=128)
         self.daemon = True
@@ -158,17 +158,17 @@ class SimulationThread(Thread):
 
             # get samples
             try:
-                all_seg_return_tuples = ray_get_and_free(ready_sample_ids)
+                all_batch_return = ray_get_and_free(ready_sample_ids)
             except ray.exceptions.UnreconstructableError as e:
-                all_seg_return_tuples = []
+                all_batch_return = []
                 print(str(e))
             except ray.exceptions.RayError as e:
-                all_seg_return_tuples = []
+                all_batch_return = []
                 print(str(e))
 
             push_jobs = []
-            for segs, ep_returns in all_seg_return_tuples:
+            for data_batches, ep_returns in all_batch_return:
                 push_jobs.append(self.recorder.push.remote(ep_returns))
-                for seg in segs:
-                    self.global_queue.put(seg)
+                for data_batch in data_batches:
+                    self.global_buffer.put(data_batch)
             ray.get(push_jobs)

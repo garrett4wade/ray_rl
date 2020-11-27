@@ -19,6 +19,7 @@ from ray.rllib.env.atari_wrappers import wrap_deepmind
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
 parser.add_argument("--exp_name", type=str, default='ray_test0', help='experiment name')
+parser.add_argument('--gpu_id', type=int, default=1, help='gpu id')
 
 # environment
 parser.add_argument('--env_name', type=str, default='PongNoFrameskip-v4', help='name of env')
@@ -27,12 +28,12 @@ parser.add_argument('--total_frames', type=int, default=int(10e6), help='optimiz
 
 # important parameters of model and algorithm
 parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer size of mlp & gru')
-parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
+parser.add_argument('--batch_size', type=int, default=int(512*64), help='optimization batch size')
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
 parser.add_argument('--value_coef', type=float, default=1.0, help='entropy loss coefficient')
-parser.add_argument('--gamma', type=float, default=0.997, help='discount factor')
-parser.add_argument('--lamb', type=float, default=0.97, help='gae discount factor')
+parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
+parser.add_argument('--lmbda', type=float, default=0.97, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
 parser.add_argument('--n_epoch', type=int, default=2, help='update times in each training step')
 parser.add_argument('--n_minibatch', type=int, default=4, help='update times in each training step')
@@ -49,8 +50,8 @@ parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--load_period', type=int, default=25, help='load period from parameter server')
-parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
-parser.add_argument('--num_returns', type=int, default=4, help='number of returns in ray.wait')
+parser.add_argument('--num_workers', type=int, default=12, help='remote worker numbers')
+parser.add_argument('--num_returns', type=int, default=2, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
 parser.add_argument('--q_size', type=int, default=4, help='number of batches in replay buffer')
 
@@ -107,7 +108,7 @@ if __name__ == "__main__":
     init_weights = learner.get_weights()
 
     # initialize buffer
-    keys = ['state', 'action', 'action_logits', 'value', 'reward', 'done_mask']
+    keys = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
     buffer = ReplayQueue(kwargs['batch_size'] * kwargs['q_size'], keys)
 
     # initialize workers, who are responsible for interacting with env (simulation)
@@ -117,7 +118,7 @@ if __name__ == "__main__":
                                          env_fn=build_worker_env,
                                          ps=ps,
                                          recorder=recorder,
-                                         global_queue=buffer,
+                                         global_buffer=buffer,
                                          kwargs=kwargs)
     # after starting simulation thread, workers asynchronously interact with
     # environments and send data into buffer via Ray backbone
@@ -141,7 +142,7 @@ if __name__ == "__main__":
         '''
         # pull from remote return recorder
         return_stat_job = recorder.pull.remote()
-        num_frames += np.sum(data_batch['done_mask'])
+        num_frames += np.sum(len(data_batch['obs']))
         global_step += 1
         '''
             update !
@@ -149,12 +150,16 @@ if __name__ == "__main__":
         start = time.time()
         # training loop: compute loss and backpropogate gradient update
         loss_record = dict(p_loss=[], v_loss=[], entropy_loss=[])
+
+        for k, v in data_batch.items():
+            data_batch[k] = torch.from_numpy(v).to(**learner.tpdv)
+
         for _ in range(kwargs['n_epoch']):
             minibatch_idxes = torch.split(torch.randperm(kwargs['batch_size']),
                                           kwargs['batch_size'] // kwargs['n_minibatch'])
             for idx in minibatch_idxes:
                 optimizer.zero_grad()
-                v_loss, p_loss, entropy_loss = learner.step(**{k: v[idx] for k, v in data_batch.items()})
+                v_loss, p_loss, entropy_loss = learner.compute_loss(**{k: v[idx] for k, v in data_batch.items()})
                 loss = p_loss + kwargs['value_coef'] * v_loss + kwargs['entropy_coef'] * entropy_loss
                 loss.backward()
                 nn.utils.clip_grad_norm_(learner.parameters(), kwargs['max_grad_norm'])
@@ -168,7 +173,6 @@ if __name__ == "__main__":
 
         # upload updated learner parameter to parameter server
         if global_step % kwargs['push_period'] == 0:
-            # TODO: this line will stall to wait upload job finishing, can be optimized?
             ray.get(ps.set_weights.remote(learner.get_weights()))
 
         # write summary into TensorBoard
