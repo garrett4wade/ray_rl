@@ -4,6 +4,7 @@ import torch
 from torch.distributions import Categorical
 from module.vtrace import from_importance_weights as vtrace_from_importance_weights
 from module.gae import from_rewards as gae_from_rewards
+from module.conv import ConvMaxpoolResModule
 
 
 class ActorCritic(nn.Module):
@@ -19,9 +20,10 @@ class ActorCritic(nn.Module):
         self.hidden_dim = hidden_dim = kwargs['hidden_dim']
         
         # default convolutional model in rllib
-        self.feature_net = nn.Sequential(nn.ZeroPad2d((2, 2, 2, 2)), nn.Conv2d(4, 16, kernel_size=8, stride=4), nn.ReLU(),
-                                         nn.ZeroPad2d((1, 2, 1, 2)), nn.Conv2d(16, 32, kernel_size=4, stride=2), nn.ReLU(), 
-                                         nn.Conv2d(32, hidden_dim, kernel_size=11, stride=1), nn.ReLU(), nn.Flatten())
+        self.feature_net = nn.Sequential(nn.Conv2d(4, 8, kernel_size=3, stride=1, padding=0),
+                                         nn.MaxPool2d(kernel_size=2, stride=2, padding=0), nn.ReLU(),
+                                         ConvMaxpoolResModule(8), ConvMaxpoolResModule(16), 
+                                         ConvMaxpoolResModule(32), nn.ReLU(), nn.Flatten())
 
         # actor
         self.action_layer = nn.Linear(hidden_dim, action_dim)
@@ -130,7 +132,7 @@ class ActorCritic(nn.Module):
                                                     self.clip_ratio)
         v_surr1 = ((v_target - cur_state_value[:, :-1])**2)
         v_surr2 = (v_target - cur_v_clipped)**2
-        v_loss = .5 * torch.max(v_surr1, v_surr2)
+        v_loss = torch.max(v_surr1, v_surr2)
         v_loss = (v_loss * done_mask[:, :-1]).mean()
 
         entropy_loss = -target_dist.entropy()

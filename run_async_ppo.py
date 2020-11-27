@@ -30,19 +30,20 @@ parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer si
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
-parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
+parser.add_argument('--value_coef', type=float, default=1.0, help='entropy loss coefficient')
+parser.add_argument('--gamma', type=float, default=0.997, help='discount factor')
 parser.add_argument('--lamb', type=float, default=0.97, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
 parser.add_argument('--n_epoch', type=int, default=2, help='update times in each training step')
 parser.add_argument('--n_minibatch', type=int, default=4, help='update times in each training step')
 parser.add_argument('--max_grad_norm', type=float, default=40.0, help='maximum gradient norm')
-parser.add_argument('--use_vtrace', type=bool, default=True, help='whether to use vtrace')
+parser.add_argument('--use_vtrace', type=bool, default=False, help='whether to use vtrace')
 
 # recurrent model parameters
 parser.add_argument('--burn_in_len', type=int, default=0, help='rnn hidden state burn-in length')
 parser.add_argument('--chunk_len', type=int, default=64, help='rnn BPTT chunk length')
 parser.add_argument('--replay', type=int, default=1, help='sequence cross-replay times')
-parser.add_argument('--max_timesteps', type=int, default=1000, help='episode maximum timesteps')
+parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode maximum timesteps')
 parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal chunk number before env.collect')
 
 # Ray distributed training parameters
@@ -51,7 +52,7 @@ parser.add_argument('--load_period', type=int, default=25, help='load period fro
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=4, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
-parser.add_argument('--q_size', type=int, default=16, help='number of batches in replay buffer')
+parser.add_argument('--q_size', type=int, default=4, help='number of batches in replay buffer')
 
 # random seed
 parser.add_argument('--seed', type=int, default=0, help='random seed')
@@ -60,12 +61,12 @@ kwargs = vars(parser.parse_args())
 
 
 def build_simple_env(kwargs):
-    return wrap_deepmind(gym.make(kwargs['env_name']))
+    return wrap_deepmind(gym.make(kwargs['env_name']), dim=42)
 
 
 # get state/action information from env
 init_env = build_simple_env(kwargs)
-kwargs['state_dim'] = (84, 84, 4)
+kwargs['state_dim'] = (42, 42, 4)
 kwargs['action_dim'] = init_env.action_space.n
 kwargs['continuous_env'] = False
 del init_env
@@ -154,7 +155,7 @@ if __name__ == "__main__":
             for idx in minibatch_idxes:
                 optimizer.zero_grad()
                 v_loss, p_loss, entropy_loss = learner.step(**{k: v[idx] for k, v in data_batch.items()})
-                loss = p_loss + v_loss + kwargs['entropy_coef'] * entropy_loss
+                loss = p_loss + kwargs['value_coef'] * v_loss + kwargs['entropy_coef'] * entropy_loss
                 loss.backward()
                 nn.utils.clip_grad_norm_(learner.parameters(), kwargs['max_grad_norm'])
                 optimizer.step()
