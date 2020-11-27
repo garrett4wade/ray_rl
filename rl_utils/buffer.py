@@ -37,9 +37,9 @@ class FIFOQueue():
 
 
 class ReplayQueue():
-    def __init__(self, size, keys):
+    def __init__(self, maxsize, keys):
         self._storage = []
-        self._maxsize = int(size)
+        self._maxsize = int(maxsize)
         self._next_idx = 0
         self.keys = keys
 
@@ -72,36 +72,44 @@ class ReplayQueue():
 
 
 class ReplayBuffer():
-    def __init__(self, size, keys):
-        self._storage = []
-        self._maxsize = int(size)
-        self._next_idx = 0
+    def __init__(self, maxsize, keys, shapes, pad_values):
+        self._storage = {}
+        for k in keys:
+            init_value = np.zeros if pad_values[k] == 0 else np.ones
+            self._storage[k] = init_value((maxsize, *shapes[k]), dtype=np.float32)
+
+        self._maxsize = int(maxsize)
+        self._filled = self._next_idx = 0
         self.keys = keys
 
     def size(self):
-        return len(self._storage)
+        return self._filled
 
     def __len__(self):
-        return len(self._storage)
+        return self._filled
 
-    def put(self, seg):
-        if self._next_idx >= len(self._storage):
-            self._storage.append(seg)
+    def put(self, data_batch):
+        batch_size = len(data_batch[self.keys[0]])
+        if self._next_idx + batch_size > self._maxsize:
+            remaining = self._next_idx + batch_size - self._maxsize
+            idx = np.concatenate([np.arange(self._next_idx, self._maxsize), np.arange(remaining)], axis=0)
         else:
-            self._storage[self._next_idx] = seg
-        self._next_idx = (self._next_idx + 1) % self._maxsize
+            idx = np.arange(self._next_idx, self._next_idx + batch_size)
+
+        for k, v in data_batch.items():
+            self._storage[k][idx] = v
+
+        self._next_idx = (self._next_idx + batch_size) % self._maxsize
+        self._filled = min(self._filled + batch_size, self._maxsize)
 
     def get(self, batch_size):
         if self.size() <= batch_size:
             return None
-        idxes = np.random.choice(self.size(), batch_size, replace=False)
-        segs = [self._storage[i] for i in idxes]
-
-        return {
-            k: np.stack([seg[k] for seg in segs], axis=0) if
-            k != 'hidden_state' else np.stack([seg[k] for seg in segs], axis=1)
-            for k in self.keys
-        }
+        idx = np.random.choice(self.size(), batch_size, replace=False)
+        data_batch = {}
+        for k, v in self._storage.items():
+            data_batch[k] = v[idx]
+        return data_batch
 
 
 class PrioritizedReplayBuffer():

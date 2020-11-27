@@ -1,167 +1,93 @@
 import numpy as np
+from scipy.signal import lfilter
 from collections import namedtuple
 from gym.spaces.box import Box
 from gym.spaces.discrete import Discrete
 
-# Seg is a tuple that gathers all kinds of data we need
-Seg = namedtuple("Seg", ['state', 'action', 'action_logits', 'value', 'reward', 'done_mask'])
+ROLLOUT_KEYS = ['obs', 'act', 'act_logits', 'value', 'reward']
+COLLECT_KEYS = ['obs', 'act', 'act_logits', 'value', 'adv', 'value_target']
 
 
 class Env:
-    '''
-    Gym env wrapper for recurrent network training.
-
-    When stepping along one episode,
-    store required data into (self.**_history).
-
-    When a episode is done or there's plenty of history data,
-    cut history data into (burn_in_len + chunk_len + 1) sequences
-    for training.
-    NOTE:
-    1. 'burn_in_len' data is for GRU hidden state computation for
-       'chunk_len' data.
-    2. 'chunk_len' data is for loss computation.
-    3. Last time dimension is for value bootstraping.
-    '''
     def __init__(self, env_fn, kwargs):
         self.env = env_fn(kwargs)
+
         if isinstance(self.env.action_space, Box):
             self.is_continuous = True
         elif isinstance(self.env.action_space, Discrete):
             self.is_continuous = False
         assert not self.is_continuous, "this branch is for Atari game, environment action space must be discrete"
 
-        # basic network parameters
-        self.state_dim = kwargs['state_dim']
-        self.action_dim = kwargs['action_dim']
-
-        # for recurrent network training, hyperparameters of sequece data
-        self.burn_in_len = 0
-        self.chunk_len = kwargs['chunk_len']
-        self.replay = 1
-        self.max_timesteps = kwargs['max_timesteps']
-
-        # parameters that decide how much data we need before collecting them
-        self.min_return_chunk_num = kwargs['min_return_chunk_num']
-        assert self.chunk_len % self.replay == 0
-        self.step_size = self.chunk_len // self.replay
-        self.target_len = self.burn_in_len + self.chunk_len + 1
-
+        self.gamma = kwargs['gamma']
+        self.lmbda = kwargs['lmbda']
         self.done = False
-        self.ep_return = 0
-        self.ep_step = 0
+        self.ep_step = self.ep_return = 0
         self.reset()
 
     def reset(self):
         if self.done:
             print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
-        self.state = self.preprocess_state(self.env.reset())
+        self.obs = self.preprocess_obs(self.env.reset())
         self.done = False
-        self.ep_return = 0
-        self.ep_step = 0
-
+        self.ep_step = self.ep_return = 0
         self.reset_history()
-        '''
-            state, done & hidden are aligned
-            others are aligned with 1 less element than them
-        '''
-        self.state_history.append(self.state)
-        self.done_mask.append(1)
 
     def reset_history(self):
-        self.state_history = [np.zeros(self.state_dim, dtype=np.float32)] * self.burn_in_len
-        # for discrete env, action is an integer number
-        self.action_history = [0] * self.burn_in_len
-        self.action_logits_history = [np.zeros(self.action_dim, dtype=np.float32)] * self.burn_in_len
-        self.reward_history = [0] * self.burn_in_len
-        self.done_mask = [0] * self.burn_in_len
-        self.value_history = [0] * self.burn_in_len
+        self.history = {}
+        for k in ROLLOUT_KEYS:
+            self.history[k] = []
 
-    def step(self, action, action_logits, value):
-        nex_state, r, d, _ = self.env.step(action)
-        nex_state = self.preprocess_state(nex_state)
+    def step(self, act, act_logits, value, model):
+        n_obs, r, d, _ = self.env.step(action)
+        n_obs = self.preprocess_obs(n_obs)
 
         self.ep_return += r
         self.ep_step += 1
 
-        self.action_history.append(action)
-        self.action_logits_history.append(action_logits)
-        self.reward_history.append(r)
-        self.value_history.append(value)
+        self.history['obs'].append(self.obs)
+        self.history['act'].append(act)
+        self.history['act_logits'].append(act_logits)
+        self.history['reward'].append(r)
+        self.history['value'].append(value)
 
-        self.state = nex_state
+        self.obs = n_obs
         self.done = d or self.ep_step >= self.max_timesteps
 
-        self.state_history.append(nex_state)
-        self.done_mask.append(0 if self.done else 1)
-
-        segs = self.collect()
-        ep_return = None
         if self.done:
+            bootstrap_value = model.value(n_obs)
+            data_batch = self.collect(bootstrap_value)
             ep_return = self.ep_return
             self.reset()
-        return segs, ep_return
-
-    def collect(self):
-        seg = None
-        # while not done, if history data can compose k chunks,
-        # then return them early before done
-        k = self.min_return_chunk_num
-        burn_in = self.burn_in_len
-        chunk = self.chunk_len
-        step_size = self.step_size
-        cut_len = (k - 1) * step_size + burn_in + chunk + 1
-
-        if self.done:
-            seg = Seg(np.stack(self.state_history, axis=0), np.stack(self.action_history, axis=0),
-                      np.stack(self.action_logits_history, axis=0), np.stack(self.value_history, axis=0),
-                      np.stack(self.reward_history, axis=0), np.stack(self.done_mask, axis=0))
-        elif len(self.value_history) >= cut_len:
-            seg = Seg(np.stack(self.state_history[:cut_len], axis=0), np.stack(self.action_history[:cut_len], axis=0),
-                      np.stack(self.action_logits_history[:cut_len], axis=0),
-                      np.stack(self.value_history[:cut_len], axis=0), np.stack(self.reward_history[:cut_len], axis=0),
-                      np.stack(self.done_mask[:cut_len], axis=0))
-
-            cut_off = k * step_size
-            self.state_history = self.state_history[cut_off:]
-            self.action_history = self.action_history[cut_off:]
-            self.action_logits_history = self.action_logits_history[cut_off:]
-            self.value_history = self.value_history[cut_off:]
-            self.reward_history = self.reward_history[cut_off:]
-            self.done_mask = self.done_mask[cut_off:]
-
-        if seg is None:
-            return []
+            return data_batch, ep_return
         else:
-            return self.split_and_padding(seg)
+            return None, None
 
-    def split_and_padding(self, seg):
-        results = []
-        step_size = self.chunk_len // self.replay
-        target_len = self.burn_in_len + self.chunk_len + 1
-        while len(seg[0]) > 0:
-            '''
-                NOTE need to ensure first dim is time dimension
-            '''
-            sequence = [s[:target_len] for s in seg]
-            keys = ['state', 'action', 'action_logits', 'value', 'reward', 'done_mask']
-            seg_dict = dict()
-            for i, s in enumerate(sequence):
-                key = keys[i]
-                pad = tuple([(0, target_len - s.shape[0])] + [(0, 0)] * (s.ndim - 1))
-                seg_dict[key] = np.pad(s, pad, 'constant', constant_values=0)
-            results.append(seg_dict)
-            seg = Seg(*[s[step_size:] for s in seg])
-        return results
+    def collect(self, bootstrap_value):
+        v_target, adv = self.compute_gae(bootstrap_value)
+        data_batch = {}
+        for k in COLLECT_KEYS:
+            if k in ROLLOUT_KEYS:
+                data_batch[k] = np.stack(self.history[k], axis=0)
+            elif k == 'value_target':
+                data_batch[k] = v_target
+            elif k == 'adv':
+                data_batch[k] = adv
+        return data_batch
 
-    def get_state(self):
-        return self.state
-    
-    def preprocess_state(self, state):
-        state = np.transpose(state, [2, 0, 1]).astype(np.float32)
-        return (state - 128.0) / 128.0
+    def preprocess_obs(self, obs):
+        obs = np.transpose(obs, [2, 0, 1]).astype(np.float32)
+        return (obs - 128.0) / 128.0
 
+    def compute_gae(self, bootstrap_value):
+        discounted_r = lfilter([1], [1, -self.gamma], self.history['reward'][::-1])[::-1]
+        episode_length = len(self.history['reward'])
+        n_step_v = discounted_r + bootstrap_value * gamma**np.arange(episode_length, 0, -1)
+        td_err = n_step_v - np.array(self.history['value'], dtype=np.float32)
+        adv = lfilter([1], [1, -self.lmbda], td_err[::-1])[::-1]
+        td_lmbda = lfilter([1], [1, -self.lmbda], n_step_v[::-1])[::-1]
+        return td_lmbda, adv
 
+   
 class Envs:
     def __init__(self, env_fn, kwargs):
         self.envs = [Env(env_fn, kwargs) for _ in range(kwargs['env_num'])]
@@ -169,14 +95,14 @@ class Envs:
     def step(self, model):
         actions, action_logits, values = model.step(self.get_model_inputs())
 
-        segs, ep_returns = [], []
+        data_batches, ep_returns = [], []
         for i, env in enumerate(self.envs):
-            cur_segs, cur_ep_return = env.step(actions[i], action_logits[i], values[i])
-            if len(cur_segs) > 0:
-                segs += cur_segs
+            cur_data_batch, cur_ep_return = env.step(actions[i], action_logits[i], values[i], model)
+            if cur_data_batch is not None:
+                data_batches.append(cur_data_batch)
             if cur_ep_return is not None:
                 ep_returns.append(cur_ep_return)
         return segs, ep_returns
 
     def get_model_inputs(self):
-        return np.stack([env.get_state() for env in self.envs], axis=0)
+        return np.stack([env.obs for env in self.envs], axis=0)
