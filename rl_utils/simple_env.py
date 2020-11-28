@@ -1,6 +1,8 @@
 import numpy as np
+from rl_utils.env_wrapper import VecEnvWithMemory, CloudpickleWrapper
+from itertools import chain
+from multiprocessing import Process, Pipe
 from scipy.signal import lfilter
-from collections import namedtuple
 from gym.spaces.box import Box
 from gym.spaces.discrete import Discrete
 
@@ -8,7 +10,7 @@ ROLLOUT_KEYS = ['obs', 'action', 'action_logits', 'value', 'reward']
 COLLECT_KEYS = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
 
 
-class Env:
+class EnvWithMemory:
     def __init__(self, env_fn, env_id, kwargs):
         self.env = env_fn(kwargs)
         self.env.seed(env_id * 12345 + kwargs['seed'])
@@ -41,7 +43,15 @@ class Env:
         for k in ROLLOUT_KEYS:
             self.history[k] = []
 
-    def step(self, action, action_logits, value, model):
+    def step(self, action, action_logits, value):
+        if self.done:
+            # if env is done in the previous step, use bootstrap value
+            # to compute gae and collect history data
+            data_batches = self.collect(value)
+            ep_return = self.ep_return
+            self.reset()
+            return data_batches, ep_return, (self.obs, )
+
         n_obs, r, d, _ = self.env.step(action)
         n_obs = self.preprocess_obs(n_obs)
 
@@ -56,15 +66,7 @@ class Env:
 
         self.obs = n_obs
         self.done = d or self.ep_step >= self.max_timesteps
-
-        if self.done:
-            bootstrap_value = model.value(n_obs)
-            data_batches = self.collect(bootstrap_value)
-            ep_return = self.ep_return
-            self.reset()
-            return data_batches, ep_return
-        else:
-            return [], None
+        return [], None, (self.obs, )
 
     def collect(self, bootstrap_value):
         v_target, adv = self.compute_gae(bootstrap_value)
@@ -106,21 +108,81 @@ class Env:
         return n_step_v, adv
 
 
-class Envs:
-    def __init__(self, env_fn, worker_id, kwargs):
-        self.envs = [Env(env_fn, worker_id + i * kwargs['num_workers'], kwargs) for i in range(kwargs['env_num'])]
+class DummyVecEnvWithMemory:
+    def __init__(self, env_fns):
+        self.envs = [env_fn() for env_fn in env_fns]
 
-    def step(self, model):
-        actions, action_logits, values = model.select_action(self.get_model_inputs())
-
-        data_batches, ep_returns = [], []
+    def step(self, actions, action_logits, values):
+        data_batches, ep_returns, model_inputs = [], [], []
         for i, env in enumerate(self.envs):
-            cur_data_batches, cur_ep_return = env.step(actions[i], action_logits[i], values[i], model)
+            cur_data_batches, cur_ep_return, model_input = env.step(actions[i], action_logits[i], values[i])
             if len(cur_data_batches) > 0:
                 data_batches += cur_data_batches
             if cur_ep_return is not None:
                 ep_returns.append(cur_ep_return)
-        return data_batches, ep_returns
+            model_inputs.append(model_input)
+        stacked_model_inputs = []
+        for inp in zip(*model_inputs):
+            stacked_model_inputs.append(np.stack(inp))
+        return data_batches, ep_returns, stacked_model_inputs
 
     def get_model_inputs(self):
-        return np.stack([env.obs for env in self.envs], axis=0)
+        return [np.stack([env.obs for env in self.envs], axis=0)]
+
+
+def worker(remote, parent_remote, env_fn_wrapper):
+    parent_remote.close()
+    env = env_fn_wrapper.x()
+    while True:
+        cmd, action, logits, value = remote.recv()
+        if cmd == 'step':
+            data_batches, ep_return, model_input = env.step(action, logits, value)
+            remote.send((data_batches, ep_return, model_input))
+        elif cmd == 'get_model_inputs':
+            remote.send((env.obs, ))
+        else:
+            raise NotImplementedError
+
+
+class SubprocVecEnvWithMemory(VecEnvWithMemory):
+    def __init__(self, env_fns):
+        """
+        envs: list of gym environments to run in subprocesses
+        """
+        self.waiting = False
+        self.closed = False
+        nenvs = len(env_fns)
+        self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(nenvs)])
+        self.ps = [
+            Process(target=worker, args=(work_remote, remote, CloudpickleWrapper(env_fn)))
+            for (work_remote, remote, env_fn) in zip(self.work_remotes, self.remotes, env_fns)
+        ]
+        for p in self.ps:
+            p.daemon = True  # if the main process crashes, we should not cause things to hang
+            p.start()
+        for remote in self.work_remotes:
+            remote.close()
+        VecEnvWithMemory.__init__(self, len(env_fns))
+
+    def step_async(self, actions, action_logits, values):
+        for remote, action, logits, value in zip(self.remotes, actions, action_logits, values):
+            remote.send(('step', action, logits, value))
+        self.waiting = True
+
+    def step_wait(self):
+        results = [remote.recv() for remote in self.remotes]
+        self.waiting = False
+        nested_data_batches, ep_returns, model_inputs = zip(*results)
+        stacked_model_inputs = []
+        for inp in zip(*model_inputs):
+            stacked_model_inputs.append(np.stack(inp))
+        return list(chain.from_iterable(nested_data_batches)), list(filter(None, ep_returns)), stacked_model_inputs
+
+    def get_model_inputs(self):
+        for remote in self.remotes:
+            remote.send(('get_model_inputs', None, None, None))
+        model_inputs = [remote.recv() for remote in self.remotes]
+        stacked_model_inputs = []
+        for inp in zip(*model_inputs):
+            stacked_model_inputs.append(np.stack(inp))
+        return stacked_model_inputs

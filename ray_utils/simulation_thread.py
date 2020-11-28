@@ -2,7 +2,6 @@ from threading import Thread
 import time
 
 import ray
-import sys
 from queue import Queue
 
 _LAST_FREE_TIME = 0.0
@@ -52,10 +51,10 @@ class Worker():
     Model continuously interacts with env to get data,
     and waits RolloutCollector to collect generated data.
     '''
-    def __init__(self, worker_id, model_fn, env_fn, ps, kwargs):
+    def __init__(self, worker_id, model_fn, worker_env_fn, ps, kwargs):
         self.id = worker_id
 
-        self.env = env_fn(worker_id, kwargs)
+        self.env = worker_env_fn(worker_id, kwargs)
         self.model = model_fn(kwargs)
 
         self.ps = ps
@@ -79,12 +78,13 @@ class Worker():
     def _data_generator(self):
         # invoke env.step to generate data
         global_step = 0
+        model_inputs = self.env.get_model_inputs()
         while True:
             if global_step % self.load_period == 0:
                 self.get_new_weights()
             global_step += 1
-
-            data_batches, ep_returns = self.env.step(self.model)
+            actions, action_logits, values = self.model.select_action(*model_inputs)
+            data_batches, ep_returns, model_inputs = self.env.step(actions, action_logits, values)
             if len(data_batches) == 0:
                 continue
             yield (data_batches, ep_returns)
@@ -94,13 +94,13 @@ class Worker():
 
 
 class RolloutCollector():
-    def __init__(self, model_fn, env_fn, ps, kwargs):
+    def __init__(self, model_fn, worker_env_fn, ps, kwargs):
         self.num_workers = int(kwargs['num_workers'])
         self.ps = ps
         self.workers = [
             ray.remote(num_cpus=kwargs['cpu_per_worker'])(Worker).remote(worker_id=i,
                                                                          model_fn=model_fn,
-                                                                         env_fn=env_fn,
+                                                                         worker_env_fn=worker_env_fn,
                                                                          ps=ps,
                                                                          kwargs=kwargs) for i in range(self.num_workers)
         ]
@@ -136,9 +136,9 @@ class RolloutCollector():
 
 
 class SimulationThread(Thread):
-    def __init__(self, model_fn, env_fn, ps, recorder, global_buffer, kwargs):
+    def __init__(self, model_fn, worker_env_fn, ps, recorder, global_buffer, kwargs):
         super().__init__()
-        self.rollout_collector = RolloutCollector(model_fn=model_fn, env_fn=env_fn, ps=ps, kwargs=kwargs)
+        self.rollout_collector = RolloutCollector(model_fn=model_fn, worker_env_fn=worker_env_fn, ps=ps, kwargs=kwargs)
         self.global_buffer = global_buffer
         self.recorder = recorder
         self.ready_id_queue = Queue(maxsize=128)

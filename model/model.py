@@ -3,8 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from torch.distributions import Categorical
-from module.vtrace import from_importance_weights as vtrace_from_importance_weights
-from module.gae import from_rewards as gae_from_rewards
 from module.conv import ConvMaxpoolResModule
 
 
@@ -35,15 +33,15 @@ class ActorCritic(nn.Module):
         self.tpdv = dict(device=self.device, dtype=torch.float32)
         self.to(self.device)
 
-    def core(self, state):
-        if state.ndim == 4:
-            return self.feature_net(state)
+    def core(self, obs):
+        if obs.ndim == 4:
+            return self.feature_net(obs)
         else:
-            b, t, c, h, w = state.shape
-            return self.feature_net(state.view(b * t, c, h, w)).reshape(b, t, -1)
+            b, t, c, h, w = obs.shape
+            return self.feature_net(obs.view(b * t, c, h, w)).reshape(b, t, -1)
 
-    def forward(self, state):
-        x = self.core(state)
+    def forward(self, obs):
+        x = self.core(obs)
         action_logits = self.action_layer(x)
         value = self.value_layer(x).squeeze(-1)
 

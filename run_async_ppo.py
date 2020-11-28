@@ -1,4 +1,3 @@
-import os
 import gym
 import ray
 import time
@@ -9,7 +8,7 @@ import argparse
 import numpy as np
 import torch.optim as optim
 
-from rl_utils.simple_env import Envs
+from rl_utils.simple_env import EnvWithMemory, DummyVecEnvWithMemory, SubprocVecEnvWithMemory
 from rl_utils.buffer import ReplayQueue
 from model.model import ActorCritic
 from ray_utils.ps import ParameterServer, ReturnRecorder
@@ -24,14 +23,15 @@ parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
 
 # environment
 parser.add_argument('--env_name', type=str, default='PongNoFrameskip-v4', help='name of env')
-parser.add_argument('--env_num', type=int, default=8, help='number of evironments per worker')
+parser.add_argument('--use_subproc', type=bool, default=True, help='whether to use subprocess vectorized env')
+parser.add_argument('--env_num', type=int, default=4, help='number of evironments per worker')
 parser.add_argument('--total_frames', type=int, default=int(20e6), help='optimization batch size')
 
 # important parameters of model and algorithm
 parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer size of mlp & gru')
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
-parser.add_argument('--entropy_coef', type=float, default=.0, help='entropy loss coefficient')
+parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
 parser.add_argument('--value_coef', type=float, default=1.0, help='entropy loss coefficient')
 parser.add_argument('--gamma', type=float, default=0.997, help='discount factor')
 parser.add_argument('--lmbda', type=float, default=0.97, help='gae discount factor')
@@ -51,10 +51,10 @@ parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--load_period', type=int, default=25, help='load period from parameter server')
-parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
+parser.add_argument('--num_workers', type=int, default=16, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=4, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
-parser.add_argument('--q_size', type=int, default=16, help='number of batches in replay buffer')
+parser.add_argument('--q_size', type=int, default=4, help='number of batches in replay buffer')
 
 # random seed
 parser.add_argument('--seed', type=int, default=0, help='random seed')
@@ -76,7 +76,14 @@ del init_env
 
 
 def build_worker_env(worker_id, kwargs):
-    return Envs(build_simple_env, worker_id, kwargs)
+    env_fns = [
+        lambda: EnvWithMemory(build_simple_env, worker_id + i * kwargs['num_workers'], kwargs)
+        for i in range(kwargs['num_workers'])
+    ]
+    if kwargs['use_subproc']:
+        return SubprocVecEnvWithMemory(env_fns)
+    else:
+        return DummyVecEnvWithMemory(env_fns)
 
 
 def build_worker_model(kwargs):
@@ -145,7 +152,7 @@ if __name__ == "__main__":
     ps = ParameterServer.remote(weights=init_weights)
     recorder = ReturnRecorder.remote()
     simulation_thread = SimulationThread(model_fn=build_worker_model,
-                                         env_fn=build_worker_env,
+                                         worker_env_fn=build_worker_env,
                                          ps=ps,
                                          recorder=recorder,
                                          global_buffer=buffer,
@@ -167,12 +174,10 @@ if __name__ == "__main__":
         while data_batch is None:
             data_batch = buffer.get(config.batch_size)
         sample_time = time.time() - iter_start
-        '''
-            split data for burn-in and backpropogation
-        '''
+
         # pull from remote return recorder
         return_stat_job = recorder.pull.remote()
-        num_frames += config.batch_size
+        num_frames += np.prod(data_batch['adv'].shape[:2])
         global_step += 1
         '''
             update !
