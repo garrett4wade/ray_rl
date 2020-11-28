@@ -63,8 +63,7 @@ class ReplayQueue():
         idxes = np.random.choice(self.size(), batch_size, replace=False)
         idxes = sorted(idxes, reverse=True)
         segs = [self._storage.pop(i) for i in idxes]
-        # random.shuffle(segs)
-
+        self._next_idx = len(self._storage)
         return {k: np.stack([seg[k] for seg in segs], axis=0) for k in self.keys}
 
 
