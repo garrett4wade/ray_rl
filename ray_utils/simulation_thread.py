@@ -171,14 +171,5 @@ class SimulationThread(Thread):
             for data_batches, ep_returns in all_batch_return:
                 push_jobs.append(self.recorder.push.remote(ep_returns))
                 for data_batch in data_batches:
-                    # total_mem = 0
-                    # total_float_num = 0
-                    # for v in data_batch.values():
-                    #     total_mem += sys.getsizeof(v)
-                    #     total_float_num += sum(v.shape)
-                    # print("data dict accupies mem {}B, ".format(sys.getsizeof(data_batch)) +
-                    #       "while data inside occupies mem {}B ".format(total_mem) +
-                    #       "with episode length {}, ".format(len(data_batch['adv'])) +
-                    #       "# of total float32 number is {}".format(total_float_num))
                     self.global_buffer.put(data_batch)
             ray.get(push_jobs)

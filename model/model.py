@@ -37,8 +37,11 @@ class ActorCritic(nn.Module):
         self.to(self.device)
 
     def core(self, state):
-        assert torch.all((state >= -1).logical_and(state <= 1))
-        return self.feature_net(state)
+        if state.ndim == 4:
+            return self.feature_net(state)
+        else:
+            b, t, c, h, w = state.shape
+            return self.feature_net(state.view(b * t, c, h, w)).reshape(b, t, -1)
 
     def forward(self, state):
         x = self.core(state)
@@ -65,8 +68,9 @@ class ActorCritic(nn.Module):
 
     def compute_loss(self, obs, action, action_logits, adv, value, value_target):
         action = action.to(torch.long)
+        # to remove padding values
+        valid_mask = (value != 0.0).to(torch.float32)
 
-        # all following code is for loss computation
         _, target_action_logits, cur_state_value = self(obs)
 
         target_dist = Categorical(logits=target_action_logits)
@@ -77,13 +81,13 @@ class ActorCritic(nn.Module):
         rhos = log_rhos.exp()
 
         p_surr = adv * torch.clamp(rhos, 1 - self.clip_ratio, 1 + self.clip_ratio)
-        p_loss = -torch.min(p_surr, rhos * adv).mean()
+        p_loss = (-torch.min(p_surr, rhos * adv) * valid_mask).mean()
 
         cur_v_clipped = value + torch.clamp(cur_state_value - value, -self.clip_ratio, self.clip_ratio)
         v_loss = torch.max(F.mse_loss(cur_state_value, value_target), F.mse_loss(cur_v_clipped, value_target))
-        v_loss = v_loss.mean()
+        v_loss = (v_loss * valid_mask).mean()
 
-        entropy_loss = -target_dist.entropy().mean()
+        entropy_loss = (-target_dist.entropy() * valid_mask).mean()
         return v_loss, p_loss, entropy_loss
 
     def get_weights(self):

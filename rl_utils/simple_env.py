@@ -59,12 +59,12 @@ class Env:
 
         if self.done:
             bootstrap_value = model.value(n_obs)
-            data_batch = self.collect(bootstrap_value)
+            data_batches = self.collect(bootstrap_value)
             ep_return = self.ep_return
             self.reset()
-            return data_batch, ep_return
+            return data_batches, ep_return
         else:
-            return None, None
+            return [], None
 
     def collect(self, bootstrap_value):
         v_target, adv = self.compute_gae(bootstrap_value)
@@ -80,7 +80,7 @@ class Env:
 
     def split_and_padding(self, data_batch):
         episode_length = len(data_batch['adv'])
-        chunk_num = int(np.ceil(episode_length // self.chunk_len))
+        chunk_num = int(np.ceil(episode_length / self.chunk_len))
         split_indices = [self.chunk_len * i for i in range(1, chunk_num)]
         chunks = [{} for _ in range(chunk_num)]
         for k, v in data_batch.items():
