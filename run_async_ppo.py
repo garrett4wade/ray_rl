@@ -19,13 +19,13 @@ from ray.rllib.env.atari_wrappers import wrap_deepmind
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
 parser.add_argument("--exp_name", type=str, default='ray_test0', help='experiment name')
-parser.add_argument("--write_summary", type=bool, default=False, help='whether to write summary')
-parser.add_argument('--gpu_id', type=int, default=1, help='gpu id')
+parser.add_argument("--write_summary", type=bool, default=True, help='whether to write summary')
+parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
 
 # environment
 parser.add_argument('--env_name', type=str, default='PongNoFrameskip-v4', help='name of env')
 parser.add_argument('--env_num', type=int, default=8, help='number of evironments per worker')
-parser.add_argument('--total_frames', type=int, default=int(10e6), help='optimization batch size')
+parser.add_argument('--total_frames', type=int, default=int(20e6), help='optimization batch size')
 
 # important parameters of model and algorithm
 parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer size of mlp & gru')
@@ -33,10 +33,10 @@ parser.add_argument('--batch_size', type=int, default=int(512 * 64), help='optim
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
 parser.add_argument('--value_coef', type=float, default=1.0, help='entropy loss coefficient')
-parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
+parser.add_argument('--gamma', type=float, default=0.997, help='discount factor')
 parser.add_argument('--lmbda', type=float, default=0.97, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
-parser.add_argument('--n_epoch', type=int, default=6, help='update times in each training step')
+parser.add_argument('--n_epoch', type=int, default=2, help='update times in each training step')
 parser.add_argument('--n_minibatch', type=int, default=4, help='update times in each training step')
 parser.add_argument('--max_grad_norm', type=float, default=40.0, help='maximum gradient norm')
 parser.add_argument('--use_vtrace', type=bool, default=False, help='whether to use vtrace')
@@ -51,10 +51,10 @@ parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--load_period', type=int, default=25, help='load period from parameter server')
-parser.add_argument('--num_workers', type=int, default=20, help='remote worker numbers')
-parser.add_argument('--num_returns', type=int, default=2, help='number of returns in ray.wait')
+parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
+parser.add_argument('--num_returns', type=int, default=4, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
-parser.add_argument('--q_size', type=int, default=4, help='number of batches in replay buffer')
+parser.add_argument('--q_size', type=int, default=16, help='number of batches in replay buffer')
 
 # random seed
 parser.add_argument('--seed', type=int, default=0, help='random seed')
@@ -126,9 +126,9 @@ if __name__ == "__main__":
                         group='atari pong',
                         job_type='hyperparameter tuning',
                         name=kwargs['exp_name'],
-                        entity='garret4wade',
+                        entity='garrett4wade',
                         config=kwargs)
-        config = wandb.confg
+        config = wandb.config
     else:
         config = args
 
@@ -209,7 +209,8 @@ if __name__ == "__main__":
         if args.write_summary:
             # write summary into weights&biases
             wandb.log(return_stat, step=num_frames)
-            wandb.log(loss_stat.update(time_stat), step=global_step)
+            wandb.log(loss_stat, step=global_step)
+            wandb.log(time_stat, step=global_step)
 
     print("############ prepare to shut down ray ############")
     ray.shutdown()
