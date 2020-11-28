@@ -32,6 +32,7 @@ class ActorCritic(nn.Module):
         self.value_layer = nn.Linear(hidden_dim, 1)
 
         self.clip_ratio = kwargs['clip_ratio']
+        self.tpdv = dict(device=self.device, dtype=torch.float32)
         self.to(self.device)
 
     def core(self, state):

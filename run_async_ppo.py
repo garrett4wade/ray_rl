@@ -31,7 +31,7 @@ parser.add_argument('--total_frames', type=int, default=int(20e6), help='optimiz
 parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer size of mlp & gru')
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
-parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
+parser.add_argument('--entropy_coef', type=float, default=.0, help='entropy loss coefficient')
 parser.add_argument('--value_coef', type=float, default=1.0, help='entropy loss coefficient')
 parser.add_argument('--gamma', type=float, default=0.997, help='discount factor')
 parser.add_argument('--lmbda', type=float, default=0.97, help='gae discount factor')
@@ -124,7 +124,7 @@ if __name__ == "__main__":
         # initialized weights&biases summary
         run = wandb.init(project='distributed rl',
                          group='atari pong',
-                         job_type='chunk speed testing',
+                         job_type='performace_evaluation',
                          name=kwargs['exp_name'],
                          entity='garrett4wade',
                          config=kwargs)
