@@ -28,12 +28,10 @@ class ActorCritic(nn.Module):
 
         # actor
         self.action_layer = nn.Linear(hidden_dim, action_dim)
-
         # critic
         self.value_layer = nn.Linear(hidden_dim, 1)
 
         self.clip_ratio = kwargs['clip_ratio']
-        self.tpdv = dict(device=self.device, dtype=torch.float32)
         self.to(self.device)
 
     def core(self, state):
@@ -48,23 +46,21 @@ class ActorCritic(nn.Module):
         action_logits = self.action_layer(x)
         value = self.value_layer(x).squeeze(-1)
 
-        dist = Categorical(logits=action_logits)
-        action = dist.sample()
-
+        action = Categorical(logits=action_logits).sample()
         return action, action_logits, value
 
     @torch.no_grad()
     def value(self, obs):
         assert not self.is_training
-        obs = torch.from_numpy(obs).to(**self.tpdv).unsqueeze(0)
-        return self.value_layer(self.core(obs)).cpu().item()
+        obs = torch.from_numpy(obs).unsqueeze(0)
+        return self.value_layer(self.core(obs)).item()
 
     @torch.no_grad()
     def select_action(self, obs):
         assert not self.is_training
-        obs = torch.from_numpy(obs).to(**self.tpdv)
+        obs = torch.from_numpy(obs)
         results = self(obs)
-        return [result.detach().cpu().numpy() for result in results]
+        return [result.numpy() for result in results]
 
     def compute_loss(self, obs, action, action_logits, adv, value, value_target):
         action = action.to(torch.long)
