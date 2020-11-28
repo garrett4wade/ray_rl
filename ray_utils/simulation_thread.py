@@ -55,7 +55,7 @@ class Worker():
     def __init__(self, worker_id, model_fn, env_fn, ps, kwargs):
         self.id = worker_id
 
-        self.env = env_fn(kwargs)
+        self.env = env_fn(worker_id, kwargs)
         self.model = model_fn(kwargs)
 
         self.ps = ps

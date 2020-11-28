@@ -29,7 +29,7 @@ parser.add_argument('--total_frames', type=int, default=int(20e6), help='optimiz
 
 # important parameters of model and algorithm
 parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer size of mlp & gru')
-parser.add_argument('--batch_size', type=int, default=int(512 * 64), help='optimization batch size')
+parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
 parser.add_argument('--value_coef', type=float, default=1.0, help='entropy loss coefficient')
@@ -75,8 +75,8 @@ kwargs['continuous_env'] = False
 del init_env
 
 
-def build_worker_env(kwargs):
-    return Envs(build_simple_env, kwargs)
+def build_worker_env(worker_id, kwargs):
+    return Envs(build_simple_env, worker_id, kwargs)
 
 
 def build_worker_model(kwargs):
@@ -123,11 +123,11 @@ if __name__ == "__main__":
     if args.write_summary:
         # initialized weights&biases summary
         run = wandb.init(project='distributed rl',
-                        group='atari pong',
-                        job_type='hyperparameter tuning',
-                        name=kwargs['exp_name'],
-                        entity='garrett4wade',
-                        config=kwargs)
+                         group='atari pong',
+                         job_type='chunk speed testing',
+                         name=kwargs['exp_name'],
+                         entity='garrett4wade',
+                         config=kwargs)
         config = wandb.config
     else:
         config = args
@@ -208,9 +208,7 @@ if __name__ == "__main__":
         time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
         if args.write_summary:
             # write summary into weights&biases
-            wandb.log(return_stat, step=num_frames)
-            wandb.log(loss_stat, step=global_step)
-            wandb.log(time_stat, step=global_step)
+            wandb.log({**return_stat, **loss_stat, **time_stat}, step=num_frames)
 
     print("############ prepare to shut down ray ############")
     ray.shutdown()
