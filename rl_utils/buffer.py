@@ -30,8 +30,9 @@ class FIFOQueue():
         # random.shuffle(segs)
 
         return {
-            k: np.stack([seg[k] for seg in segs], axis=0) if
-            k != 'hidden_state' else np.stack([seg[k] for seg in segs], axis=1)
+            k:
+            np.stack([seg[k]
+                      for seg in segs], axis=0) if k != 'hidden_state' else np.stack([seg[k] for seg in segs], axis=1)
             for k in self.keys
         }
 
@@ -55,11 +56,11 @@ class ReplayQueue():
         else:
             self._storage[self._next_idx] = seg
         self._next_idx = (self._next_idx + 1) % self._maxsize
-    
+
     def put(self, data_batch):
         batch_size = list(data_batch.values())[0].shape[0]
         for i in range(batch_size):
-            self.put_one_seg({k:v[i] for k, v in data_batch.items()})
+            self.put_one_seg({k: v[i] for k, v in data_batch.items()})
 
     def get(self, batch_size):
         if self.size() <= batch_size:
@@ -69,11 +70,7 @@ class ReplayQueue():
         segs = [self._storage.pop(i) for i in idxes]
         random.shuffle(segs)
 
-        return {
-            k: np.stack([seg[k] for seg in segs], axis=0) if
-            k != 'hidden_state' else np.stack([seg[k] for seg in segs], axis=1)
-            for k in self.keys
-        }
+        return {k: np.stack([seg[k] for seg in segs], axis=0) for k in self.keys}
 
 
 class ReplayBuffer():
@@ -153,10 +150,7 @@ class PrioritizedReplayBuffer():
         if self.size() <= batch_size:
             return None
         total_priorities = np.sum(self._prioritization)
-        idxes = np.random.choice(self.size(),
-                                 batch_size,
-                                 replace=False,
-                                 p=self._prioritization / total_priorities)
+        idxes = np.random.choice(self.size(), batch_size, replace=False, p=self._prioritization / total_priorities)
         idxes = sorted(idxes, reverse=True)
         segs = [self._storage.pop(i) for i in idxes]
         random.shuffle(segs)

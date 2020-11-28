@@ -3,6 +3,7 @@ import gym
 import ray
 import time
 import torch
+import wandb
 import torch.nn as nn
 import argparse
 import numpy as np
@@ -11,7 +12,6 @@ import torch.optim as optim
 from rl_utils.simple_env import Envs
 from rl_utils.buffer import ReplayQueue
 from model.model import ActorCritic
-from torch.utils.tensorboard import SummaryWriter
 from ray_utils.ps import ParameterServer, ReturnRecorder
 from ray_utils.simulation_thread import SimulationThread
 from ray.rllib.env.atari_wrappers import wrap_deepmind
@@ -19,6 +19,7 @@ from ray.rllib.env.atari_wrappers import wrap_deepmind
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
 parser.add_argument("--exp_name", type=str, default='ray_test0', help='experiment name')
+parser.add_argument("--write_summary", type=bool, default=False, help='whether to write summary')
 parser.add_argument('--gpu_id', type=int, default=1, help='gpu id')
 
 # environment
@@ -28,14 +29,14 @@ parser.add_argument('--total_frames', type=int, default=int(10e6), help='optimiz
 
 # important parameters of model and algorithm
 parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer size of mlp & gru')
-parser.add_argument('--batch_size', type=int, default=int(512*64), help='optimization batch size')
+parser.add_argument('--batch_size', type=int, default=int(512 * 64), help='optimization batch size')
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
 parser.add_argument('--value_coef', type=float, default=1.0, help='entropy loss coefficient')
 parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lmbda', type=float, default=0.97, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
-parser.add_argument('--n_epoch', type=int, default=2, help='update times in each training step')
+parser.add_argument('--n_epoch', type=int, default=6, help='update times in each training step')
 parser.add_argument('--n_minibatch', type=int, default=4, help='update times in each training step')
 parser.add_argument('--max_grad_norm', type=float, default=40.0, help='maximum gradient norm')
 parser.add_argument('--use_vtrace', type=bool, default=False, help='whether to use vtrace')
@@ -50,7 +51,7 @@ parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--load_period', type=int, default=25, help='load period from parameter server')
-parser.add_argument('--num_workers', type=int, default=12, help='remote worker numbers')
+parser.add_argument('--num_workers', type=int, default=20, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=2, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
 parser.add_argument('--q_size', type=int, default=4, help='number of batches in replay buffer')
@@ -58,7 +59,8 @@ parser.add_argument('--q_size', type=int, default=4, help='number of batches in 
 # random seed
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 
-kwargs = vars(parser.parse_args())
+args = parser.parse_args()
+kwargs = vars(args)
 
 
 def build_simple_env(kwargs):
@@ -89,6 +91,25 @@ def build_learner_model(kwargs):
     return ActorCritic(True, kwargs)
 
 
+def train_learner_on_minibatch(learner, optimizer, data_batch, config):
+    batch_size = config.batch_size
+    n_minibatch = config.n_minibatch
+    stat = dict(v_loss=[], p_loss=[], entropy_loss=[])
+    minibatch_idxes = torch.split(torch.randperm(batch_size), batch_size // n_minibatch)
+    for idx in minibatch_idxes:
+        optimizer.zero_grad()
+        v_loss, p_loss, entropy_loss = learner.compute_loss(**{k: v[idx] for k, v in data_batch.items()})
+        loss = p_loss + config.value_coef * v_loss + config.entropy_coef * entropy_loss
+        loss.backward()
+        nn.utils.clip_grad_norm_(learner.parameters(), config.max_grad_norm)
+        optimizer.step()
+
+        stat['v_loss'].append(v_loss.item())
+        stat['p_loss'].append(p_loss.item())
+        stat['entropy_loss'].append(entropy_loss.item())
+    return {k: np.mean(v) for k, v in stat.items()}
+
+
 if __name__ == "__main__":
     exp_start_time = time.time()
 
@@ -99,17 +120,26 @@ if __name__ == "__main__":
     # initialize ray
     ray.init()
 
-    # initialized TensorBoard summary writer
-    writer = SummaryWriter(log_dir=os.path.join('./runs', kwargs['exp_name']), comment='Humanoid-v2')
+    if args.write_summary:
+        # initialized weights&biases summary
+        run = wandb.init(project='distributed rl',
+                        group='atari pong',
+                        job_type='hyperparameter tuning',
+                        name=kwargs['exp_name'],
+                        entity='garret4wade',
+                        config=kwargs)
+        config = wandb.confg
+    else:
+        config = args
 
     # initialize learner, who is responsible for gradient update
     learner = build_learner_model(kwargs)
-    optimizer = optim.Adam(learner.parameters(), lr=kwargs['lr'])
+    optimizer = optim.Adam(learner.parameters(), lr=config.lr)
     init_weights = learner.get_weights()
 
     # initialize buffer
     keys = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
-    buffer = ReplayQueue(kwargs['batch_size'] * kwargs['q_size'], keys)
+    buffer = ReplayQueue(config.batch_size * config.q_size, keys)
 
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
@@ -133,16 +163,16 @@ if __name__ == "__main__":
         '''
         iter_start = time.time()
         # wait until there's enough data in buffer
-        data_batch = buffer.get(kwargs['batch_size'])
+        data_batch = buffer.get(config.batch_size)
         while data_batch is None:
-            data_batch = buffer.get(kwargs['batch_size'])
+            data_batch = buffer.get(config.batch_size)
         sample_time = time.time() - iter_start
         '''
             split data for burn-in and backpropogation
         '''
         # pull from remote return recorder
         return_stat_job = recorder.pull.remote()
-        num_frames += np.sum(len(data_batch['obs']))
+        num_frames += config.batch_size
         global_step += 1
         '''
             update !
@@ -150,44 +180,39 @@ if __name__ == "__main__":
         start = time.time()
         # training loop: compute loss and backpropogate gradient update
         loss_record = dict(p_loss=[], v_loss=[], entropy_loss=[])
-
+        # convert numpy array to tensor and send them to desired device
         for k, v in data_batch.items():
             data_batch[k] = torch.from_numpy(v).to(**learner.tpdv)
-
-        for _ in range(kwargs['n_epoch']):
-            minibatch_idxes = torch.split(torch.randperm(kwargs['batch_size']),
-                                          kwargs['batch_size'] // kwargs['n_minibatch'])
-            for idx in minibatch_idxes:
-                optimizer.zero_grad()
-                v_loss, p_loss, entropy_loss = learner.compute_loss(**{k: v[idx] for k, v in data_batch.items()})
-                loss = p_loss + kwargs['value_coef'] * v_loss + kwargs['entropy_coef'] * entropy_loss
-                loss.backward()
-                nn.utils.clip_grad_norm_(learner.parameters(), kwargs['max_grad_norm'])
-                optimizer.step()
-
-                # record loss
-                loss_record['p_loss'].append(p_loss.item())
-                loss_record['v_loss'].append(v_loss.item())
-                loss_record['entropy_loss'].append(entropy_loss.item())
+        for _ in range(config.n_epoch):
+            stat = train_learner_on_minibatch(learner, optimizer, data_batch, config)
+            for k, v in stat.items():
+                loss_record[k].append(v)
         optimize_time = time.time() - start
 
         # upload updated learner parameter to parameter server
-        if global_step % kwargs['push_period'] == 0:
+        if global_step % config.push_period == 0:
             ray.get(ps.set_weights.remote(learner.get_weights()))
 
-        # write summary into TensorBoard
         return_stat = ray.get(return_stat_job)
-        for k, v in return_stat.items():
-            writer.add_scalar('ep_return/' + k, v, global_step=num_frames, walltime=time.time() - exp_start_time)
-        writer.add_scalar('loss/p_loss', np.mean(loss_record['p_loss']), global_step=global_step)
-        writer.add_scalar('loss/v_loss', np.mean(loss_record['v_loss']), global_step=global_step)
-        writer.add_scalar('loss/entropy_loss', np.mean(loss_record['entropy_loss']), global_step=global_step)
 
         dur = time.time() - iter_start
-        print(("Global Step: {}, Frames: {}, " + "Sample Time: {:.2f}s, Optimization Time: {:.2f}s, " +
-               "Iteration Step Time: {:.2f}s").format(global_step, num_frames, sample_time, optimize_time, dur))
+        print("----------------------------------------------")
+        print(("Global Step: {}, Frames: {}, " + "Average Return: {:.2f}, " + "Sample Time: {:.2f}s, " +
+               "Optimization Time: {:.2f}s, " + "Iteration Step Time: {:.2f}s").format(
+                   global_step, num_frames, return_stat['avg'], sample_time, optimize_time, dur))
+        print("----------------------------------------------")
+
+        # collect statistics to record
+        return_stat = {'ep_return/' + k: v for k, v in return_stat.items()}
+        loss_stat = {'loss/' + k: np.mean(v) for k, v in loss_record.items()}
+        time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
+        if args.write_summary:
+            # write summary into weights&biases
+            wandb.log(return_stat, step=num_frames)
+            wandb.log(loss_stat.update(time_stat), step=global_step)
+
     print("############ prepare to shut down ray ############")
     ray.shutdown()
-    writer.close()
+    run.finish()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
     print("############ experiment finished ############")

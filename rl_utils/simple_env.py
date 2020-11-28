@@ -85,8 +85,8 @@ class Env:
         n_step_v = discounted_r + bootstrap_value * self.gamma**np.arange(episode_length, 0, -1)
         td_err = n_step_v - np.array(self.history['value'], dtype=np.float32)
         adv = lfilter([1], [1, -self.lmbda], td_err[::-1])[::-1]
-        td_lmbda = lfilter([1], [1, -self.lmbda], n_step_v[::-1])[::-1]
-        return td_lmbda, adv
+        # td_lmbda = lfilter([1], [1, -self.lmbda], n_step_v[::-1])[::-1]
+        return n_step_v, adv
 
    
 class Envs:
