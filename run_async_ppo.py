@@ -8,6 +8,9 @@ import argparse
 import numpy as np
 import torch.optim as optim
 
+import os
+import psutil
+
 from rl_utils.simple_env import EnvWithMemory, DummyVecEnvWithMemory, SubprocVecEnvWithMemory
 from rl_utils.buffer import ReplayQueue
 from model.model import ActorCritic
@@ -53,7 +56,7 @@ parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal
 
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
-parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
+parser.add_argument('--num_workers', type=int, default=24, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=4, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
 parser.add_argument('--q_size', type=int, default=16, help='number of batches in replay buffer')
@@ -121,6 +124,7 @@ def train_learner_on_minibatch(learner, optimizer, data_batch, config):
 
 
 if __name__ == "__main__":
+    process = psutil.Process(os.getpid())
     exp_start_time = time.time()
 
     # set random seed
@@ -216,10 +220,13 @@ if __name__ == "__main__":
         return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
         loss_stat = {'loss/' + k: np.mean(v) for k, v in loss_record.items()}
         time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
-        buffer_stat = {'buffer/utilization': buffer.utilization()}
+        memory_stat = {
+            'memory/memory': process.memory_info().rss / 1024**3,
+            'memory/buffer_utilization': buffer.utilization()
+        }
         if not args.no_summary:
             # write summary into weights&biases
-            wandb.log({**return_stat, **loss_stat, **time_stat, **buffer_stat}, step=num_frames)
+            wandb.log({**return_stat, **loss_stat, **time_stat, **memory_stat}, step=num_frames)
 
         del return_stat_job
         del return_record
