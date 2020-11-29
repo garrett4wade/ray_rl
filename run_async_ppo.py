@@ -44,7 +44,7 @@ parser.add_argument('--lmbda', type=float, default=0.95, help='gae discount fact
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
 parser.add_argument('--n_epoch', type=int, default=2, help='update times in each training step')
 parser.add_argument('--n_minibatch', type=int, default=4, help='update times in each training step')
-parser.add_argument('--max_grad_norm', type=float, default=1.0, help='maximum gradient norm')
+parser.add_argument('--max_grad_norm', type=float, default=0.5, help='maximum gradient norm')
 parser.add_argument('--use_vtrace', type=bool, default=False, help='whether to use vtrace')
 
 # recurrent model parameters
@@ -56,7 +56,7 @@ parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal
 
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
-parser.add_argument('--num_workers', type=int, default=24, help='remote worker numbers')
+parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=4, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
 parser.add_argument('--q_size', type=int, default=16, help='number of batches in replay buffer')
@@ -195,6 +195,7 @@ if __name__ == "__main__":
         # convert numpy array to tensor and send them to desired device
         for k, v in data_batch.items():
             data_batch[k] = torch.from_numpy(v).to(**learner.tpdv)
+        # train learner
         for _ in range(config.n_epoch):
             stat = train_learner_on_minibatch(learner, optimizer, data_batch, config)
             for k, v in stat.items():
