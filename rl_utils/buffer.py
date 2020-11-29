@@ -50,6 +50,9 @@ class ReplayQueue():
     def __len__(self):
         return len(self._storage)
 
+    def utilization(self):
+        return self.size() / self._maxsize
+
     def put(self, seg):
         if self._next_idx >= len(self._storage):
             self._storage.append(seg)

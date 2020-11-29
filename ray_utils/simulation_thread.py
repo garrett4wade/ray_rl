@@ -1,51 +1,11 @@
-from threading import Thread
-import time
-
 import ray
+import itertools
+from copy import deepcopy
 from queue import Queue
-
-_LAST_FREE_TIME = 0.0
-_TO_FREE = []
+from threading import Thread
 
 
-def ray_get_and_free(object_ids):
-    # borrowed from rllib
-    """
-    Call ray.get and then queue the object ids for deletion.
-
-    This function should be used whenever possible in RLlib, to optimize
-    memory usage. The only exception is when an object_id is shared among
-    multiple readers.
-
-    Args:
-        object_ids (ObjectID|List[ObjectID]): Object ids to fetch and free.
-
-    Returns:
-        The result of ray.get(object_ids).
-    """
-
-    free_delay_s = 10.0
-    max_free_queue_size = 100
-
-    global _LAST_FREE_TIME
-    global _TO_FREE
-
-    result = ray.get(object_ids)
-    if type(object_ids) is not list:
-        object_ids = [object_ids]
-    _TO_FREE.extend(object_ids)
-
-    # batch calls to free to reduce overheads
-    now = time.time()
-    if (len(_TO_FREE) > max_free_queue_size or now - _LAST_FREE_TIME > free_delay_s):
-        ray.internal.free(_TO_FREE)
-        _TO_FREE = []
-        _LAST_FREE_TIME = now
-
-    return result
-
-
-class Worker():
+class Worker:
     '''
     A Worker wraps 1 env and 1 model together.
     Model continuously interacts with env to get data,
@@ -58,7 +18,6 @@ class Worker():
         self.model = model_fn(kwargs)
 
         self.ps = ps
-        self.load_period = kwargs['load_period']
         self.weight_hash = None
         self.get_new_weights()
 
@@ -66,7 +25,8 @@ class Worker():
 
     def get_new_weights(self):
         # if model parameters in parameter server is different from local model, download it
-        result = ray.get(self.ps.get_weights.remote(self.weight_hash))
+        get_weights_job = self.ps.get_weights.remote(self.weight_hash)
+        result = ray.get(get_weights_job)
         if result is not None:
             self.model.load_state_dict(result[0])
             old_hash = self.weight_hash
@@ -74,26 +34,25 @@ class Worker():
             print("Worker {} load state dict, "
                   "hashing changed from "
                   "{} to {}".format(self.id, old_hash, self.weight_hash))
+        del get_weights_job
+        del result
 
     def _data_generator(self):
-        # invoke env.step to generate data
-        global_step = 0
         model_inputs = self.env.get_model_inputs()
         while True:
-            if global_step % self.load_period == 0:
-                self.get_new_weights()
-            global_step += 1
             actions, action_logits, values = self.model.select_action(*model_inputs)
             data_batches, ep_returns, model_inputs = self.env.step(actions, action_logits, values)
             if len(data_batches) == 0:
                 continue
             yield (data_batches, ep_returns)
+            # get new weights only when at least one of vectorized envs is done
+            self.get_new_weights()
 
     def get(self):
         return next(self._data_g)
 
 
-class RolloutCollector():
+class RolloutCollector:
     def __init__(self, model_fn, worker_env_fn, ps, kwargs):
         self.num_workers = int(kwargs['num_workers'])
         self.ps = ps
@@ -156,20 +115,16 @@ class SimulationThread(Thread):
 
         while True:
             ready_sample_ids = self.ready_id_queue.get()
+            all_batch_return = ray.get(ready_sample_ids)
 
-            # get samples
-            try:
-                all_batch_return = ray_get_and_free(ready_sample_ids)
-            except ray.exceptions.UnreconstructableError as e:
-                all_batch_return = []
-                print(str(e))
-            except ray.exceptions.RayError as e:
-                all_batch_return = []
-                print(str(e))
+            nested_data_batches, nested_ep_returns = zip(*deepcopy(all_batch_return))
+            push_job = self.recorder.push.remote(list(itertools.chain.from_iterable(nested_ep_returns)))
+            for data_batch in itertools.chain.from_iterable(nested_data_batches):
+                self.global_buffer.put(data_batch)
 
-            push_jobs = []
-            for data_batches, ep_returns in all_batch_return:
-                push_jobs.append(self.recorder.push.remote(ep_returns))
-                for data_batch in data_batches:
-                    self.global_buffer.put(data_batch)
-            ray.get(push_jobs)
+            ray.get(push_job)
+            # del object references & ray.get returns
+            # hopefully this can delete object in ray object store
+            del push_job
+            del ready_sample_ids
+            del all_batch_return

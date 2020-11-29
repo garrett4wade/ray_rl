@@ -41,7 +41,7 @@ parser.add_argument('--lmbda', type=float, default=0.95, help='gae discount fact
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
 parser.add_argument('--n_epoch', type=int, default=2, help='update times in each training step')
 parser.add_argument('--n_minibatch', type=int, default=4, help='update times in each training step')
-parser.add_argument('--max_grad_norm', type=float, default=40.0, help='maximum gradient norm')
+parser.add_argument('--max_grad_norm', type=float, default=1.0, help='maximum gradient norm')
 parser.add_argument('--use_vtrace', type=bool, default=False, help='whether to use vtrace')
 
 # recurrent model parameters
@@ -53,7 +53,6 @@ parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal
 
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
-parser.add_argument('--load_period', type=int, default=25, help='load period from parameter server')
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=4, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
@@ -200,28 +199,32 @@ if __name__ == "__main__":
 
         # upload updated learner parameter to parameter server
         if global_step % config.push_period == 0:
-            ray.get(ps.set_weights.remote(learner.get_weights()))
+            push_job = ps.set_weights.remote(learner.get_weights())
+            ray.get(push_job)
+            del push_job
 
-        return_stat = ray.get(return_stat_job)
+        return_record = ray.get(return_stat_job)
 
         dur = time.time() - iter_start
         print("----------------------------------------------")
         print(("Global Step: {}, Frames: {}, " + "Average Return: {:.2f}, " + "Sample Time: {:.2f}s, " +
                "Optimization Time: {:.2f}s, " + "Iteration Step Time: {:.2f}s").format(
-                   global_step, num_frames, return_stat['avg'], sample_time, optimize_time, dur))
+                   global_step, num_frames, return_record['avg'], sample_time, optimize_time, dur))
         print("----------------------------------------------")
 
         # collect statistics to record
-        return_stat = {'ep_return/' + k: v for k, v in return_stat.items()}
+        return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
         loss_stat = {'loss/' + k: np.mean(v) for k, v in loss_record.items()}
         time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
-        buffer_stat = {'buffer/utilization': buffer.size() / buffer._maxsize}
+        buffer_stat = {'buffer/utilization': buffer.utilization()}
         if not args.no_summary:
             # write summary into weights&biases
             wandb.log({**return_stat, **loss_stat, **time_stat, **buffer_stat}, step=num_frames)
 
-    print("############ prepare to shut down ray ############")
-    ray.shutdown()
+        del return_stat_job
+        del return_record
     run.finish()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
     print("############ experiment finished ############")
+    print("############ prepare to shut down ray ############")
+    ray.shutdown()
