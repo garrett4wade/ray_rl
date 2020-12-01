@@ -128,3 +128,18 @@ class SimulationThread(Thread):
             del push_job
             del ready_sample_ids
             del all_batch_return
+
+
+class BufferCollector(Thread):
+    def __init__(self, batch_queue, buffer, batch_size):
+        self.batch_size = batch_size
+        self.buffer = buffer
+        self.batch_queue = batch_queue
+        self.daemon = True
+
+    def run(self):
+        while True:
+            batch = self.buffer.get(self.batch_size)
+            while batch is None:
+                batch = self.buffer.get(self.batch_size)
+            self.batch_queue.put(batch)

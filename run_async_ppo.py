@@ -1,21 +1,23 @@
 import gym
 import ray
 import time
-import torch
 import wandb
-import torch.nn as nn
 import argparse
 import numpy as np
+from queue import Queue
+
+import torch
+import torch.nn as nn
 import torch.optim as optim
 
 import os
 import psutil
 
 from rl_utils.simple_env import EnvWithMemory, DummyVecEnvWithMemory, SubprocVecEnvWithMemory
-from rl_utils.buffer import ReplayQueue
+from rl_utils.buffer import CircularBuffer
 from model.model import ActorCritic
 from ray_utils.ps import ParameterServer, ReturnRecorder
-from ray_utils.simulation_thread import SimulationThread
+from ray_utils.simulation_thread import SimulationThread, BufferCollector
 from ray.rllib.env.atari_wrappers import wrap_deepmind
 
 # global configuration
@@ -42,7 +44,7 @@ parser.add_argument('--value_coef', type=float, default=1.0, help='entropy loss 
 parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lmbda', type=float, default=0.95, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
-parser.add_argument('--n_epoch', type=int, default=2, help='update times in each training step')
+parser.add_argument('--reuse_times', type=int, default=2, help='sample reuse times')
 parser.add_argument('--n_minibatch', type=int, default=4, help='update times in each training step')
 parser.add_argument('--max_grad_norm', type=float, default=0.5, help='maximum gradient norm')
 parser.add_argument('--use_vtrace', type=bool, default=False, help='whether to use vtrace')
@@ -153,7 +155,7 @@ if __name__ == "__main__":
 
     # initialize buffer
     keys = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
-    buffer = ReplayQueue(config.batch_size * config.q_size, keys)
+    buffer = CircularBuffer(config.batch_size * config.q_size, config.reuse_times, keys)
 
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
@@ -168,6 +170,10 @@ if __name__ == "__main__":
     # environments and send data into buffer via Ray backbone
     simulation_thread.start()
 
+    batch_queue = Queue(maxsize=config.q_size)
+    buffer_collector = BufferCollector(batch_queue, buffer, config.batch_size)
+    buffer_collector.start()
+
     # main loop
     global_step = 0
     num_frames = 0
@@ -177,9 +183,7 @@ if __name__ == "__main__":
         '''
         iter_start = time.time()
         # wait until there's enough data in buffer
-        data_batch = buffer.get(config.batch_size)
-        while data_batch is None:
-            data_batch = buffer.get(config.batch_size)
+        data_batch = batch_queue.get()
         sample_time = time.time() - iter_start
 
         # pull from remote return recorder
@@ -190,16 +194,11 @@ if __name__ == "__main__":
             update !
         '''
         start = time.time()
-        # training loop: compute loss and backpropogate gradient update
-        loss_record = dict(p_loss=[], v_loss=[], entropy_loss=[], grad_norm=[])
         # convert numpy array to tensor and send them to desired device
         for k, v in data_batch.items():
             data_batch[k] = torch.from_numpy(v).to(**learner.tpdv)
         # train learner
-        for _ in range(config.n_epoch):
-            stat = train_learner_on_minibatch(learner, optimizer, data_batch, config)
-            for k, v in stat.items():
-                loss_record[k].append(v)
+        loss_stat = train_learner_on_minibatch(learner, optimizer, data_batch, config)
         optimize_time = time.time() - start
 
         # upload updated learner parameter to parameter server
@@ -219,11 +218,12 @@ if __name__ == "__main__":
 
         # collect statistics to record
         return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
-        loss_stat = {'loss/' + k: np.mean(v) for k, v in loss_record.items()}
+        loss_stat = {'loss/' + k: np.mean(v) for k, v in loss_stat.items()}
         time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
         memory_stat = {
             'memory/memory': process.memory_info().rss / 1024**3,
-            'memory/buffer_utilization': buffer.size() / buffer._maxsize
+            'memory/buffer_utilization': buffer.size() / buffer._maxsize,
+            'memory/batch_queue_utilization': batch_queue.qsize() / batch_queue.maxsize
         }
         if not args.no_summary:
             # write summary into weights&biases
