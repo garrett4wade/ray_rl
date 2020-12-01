@@ -50,9 +50,6 @@ class ReplayQueue():
     def __len__(self):
         return len(self._storage)
 
-    def utilization(self):
-        return self.size() / self._maxsize
-
     def put(self, seg):
         if self._next_idx >= len(self._storage):
             self._storage.append(seg)
@@ -68,6 +65,102 @@ class ReplayQueue():
         segs = [self._storage.pop(i) for i in idxes]
         self._next_idx = len(self._storage)
         return {k: np.stack([seg[k] for seg in segs], axis=0) for k in self.keys}
+
+
+class CircularBuffer:
+    def __init__(self, maxsize, reuse_times, keys):
+        self._storage = []
+
+        self._maxsize = int(maxsize)
+        assert isinstance(reuse_times, int) and reuse_times >= 1
+        self.reuse_times = reuse_times
+        self.keys = keys
+        self._next_idx = 0
+
+        self.used_times = []
+
+    def size(self):
+        return len(self._storage)
+
+    def __len__(self):
+        return len(self._storage)
+
+    def put(self, seg):
+        if self._next_idx >= len(self._storage):
+            self._storage.append(seg)
+            self.used_times.append(0)
+        else:
+            self._storage[self._next_idx] = seg
+            self.used_times[self._next_idx] = 0
+        self._next_idx = (self._next_idx + 1) % self._maxsize
+
+    def get(self, batch_size):
+        if self.size() <= batch_size:
+            return None
+        idxes = np.random.choice(self.size(), batch_size, replace=False)
+        idxes = sorted(idxes, reverse=True)
+        segs = []
+        for i in idxes:
+            if self.used_times[i] >= self.reuse_times - 1:
+                segs.append(self._storage.pop(i))
+                self.used_times.pop(i)
+            else:
+                segs.append(self._storage[i])
+                self.used_times[i] += 1
+        self._next_idx = len(self._storage)
+        return {k: np.stack([seg[k] for seg in segs], axis=0) for k in self.keys}
+
+
+class CircularBuffer2:
+    def __init__(self, maxsize, reuse_times, keys, shapes, pad_values):
+        self._storage = {}
+        for k in keys:
+            init_value = np.zeros if pad_values[k] == 0 else np.ones
+            self._storage[k] = init_value((maxsize, *shapes[k]), dtype=np.float32)
+
+        self._maxsize = int(maxsize)
+        self.keys = keys
+
+        self.reuse_times = reuse_times
+        self.used_times = np.zeros((maxsize, ), dtype=np.int32)
+
+        self.free_indices = list(range(maxsize))
+        self.full_indices = []
+
+    def size(self):
+        return len(self.full_indices)
+
+    def __len__(self):
+        return self.size()
+
+    def put(self, data_batch):
+        batch_size = len(data_batch[self.keys[0]])
+        indices = self.free_indices[:batch_size]
+        if len(indices) < batch_size:
+            indices.extend(self.full_indices[:batch_size - len(indices)])
+
+        for k, v in data_batch.items():
+            self._storage[k][indices] = v
+
+        self.free_indices = self.free_indices[batch_size:]
+        self.full_indices.extend(self.free_indices[:batch_size])
+        self.used_times[indices] = 0
+
+    def get(self, batch_size):
+        if len(self.full_indices) < batch_size:
+            return None
+        indices = np.random.choice(self.full_indices, batch_size, replace=False)
+        data_batch = {}
+        for k, v in self._storage.items():
+            data_batch[k] = v[indices]
+
+        self.used_times[indices] += 1
+        used_up_indices = indices[self.used_times[indices] >= self.reuse_times]
+        self.used_times[used_up_indices] = 0
+        self.free_indices.extend(used_up_indices)
+        for idx in used_up_indices:
+            self.full_indices.remove(idx)
+        return data_batch
 
 
 class ReplayBuffer():

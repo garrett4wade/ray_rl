@@ -223,7 +223,7 @@ if __name__ == "__main__":
         time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
         memory_stat = {
             'memory/memory': process.memory_info().rss / 1024**3,
-            'memory/buffer_utilization': buffer.utilization()
+            'memory/buffer_utilization': buffer.size() / buffer._maxsize
         }
         if not args.no_summary:
             # write summary into weights&biases

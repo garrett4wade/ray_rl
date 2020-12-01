@@ -63,6 +63,7 @@ class ActorCritic(nn.Module):
 
     def compute_loss(self, obs, action, action_logits, adv, value, value_target):
         action = action.to(torch.long)
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         # to remove padding values
         valid_mask = (value != 0.0).to(torch.float32)
 
