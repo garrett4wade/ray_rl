@@ -132,6 +132,7 @@ class SimulationThread(Thread):
 
 class BufferCollector(Thread):
     def __init__(self, batch_queue, buffer, batch_size):
+        super().__init__()
         self.batch_size = batch_size
         self.buffer = buffer
         self.batch_queue = batch_queue

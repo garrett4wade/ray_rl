@@ -38,7 +38,7 @@ parser.add_argument('--total_frames', type=int, default=int(100e6), help='optimi
 # important parameters of model and algorithm
 parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer size of mlp & gru')
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
-parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
+parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
 parser.add_argument('--value_coef', type=float, default=1.0, help='entropy loss coefficient')
 parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
@@ -58,7 +58,7 @@ parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal
 
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
-parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
+parser.add_argument('--num_workers', type=int, default=16, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=4, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
 parser.add_argument('--q_size', type=int, default=16, help='number of batches in replay buffer')
