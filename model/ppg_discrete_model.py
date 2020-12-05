@@ -139,7 +139,7 @@ class DiscreteActorCritic(nn.Module):
         (_, new_action_logits, cur_state_value, _) = self(state, hidden_state)
 
         old_action_probs = torch.softmax(action_logits, -1)
-        new_action_probs = torch.softmax(action_logits, -1)
+        new_action_probs = torch.softmax(new_action_logits, -1)
 
         # KL divergence for categorical distributions
         p_loss = (-old_action_probs * new_action_probs.log()).sum(-1).mean()
