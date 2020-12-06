@@ -13,7 +13,7 @@ import torch.optim as optim
 import os
 import psutil
 
-from rl_utils.simple_env import EnvWithMemory, DummyVecEnvWithMemory, SubprocVecEnvWithMemory
+from rl_utils.simple_env import EnvWithMemory, DummyVecEnvWithMemory
 from rl_utils.buffer import CircularBuffer
 from model.model import ActorCritic
 from ray_utils.ps import ParameterServer, ReturnRecorder
@@ -23,15 +23,17 @@ from ray.rllib.env.atari_wrappers import wrap_deepmind
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
 parser.add_argument("--exp_name", type=str, default='ray_test0', help='experiment name')
+parser.add_argument("--wandb_group", type=str, default='atari pong', help='weights & biases group name')
+parser.add_argument("--wandb_job", type=str, default='run 100M', help='weights & biases job name')
 parser.add_argument("--no_summary", action='store_true', default=False, help='whether to write summary')
 parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
 
 # environment
 parser.add_argument('--env_name', type=str, default='PongNoFrameskip-v4', help='name of env')
-parser.add_argument('--use_subproc',
-                    action='store_true',
-                    default=False,
-                    help='whether to use subprocess vectorized env')
+# parser.add_argument('--use_subproc',
+#                     action='store_true',
+#                     default=False,
+#                     help='whether to use subprocess vectorized env')
 parser.add_argument('--env_num', type=int, default=2, help='number of evironments per worker')
 parser.add_argument('--total_frames', type=int, default=int(100e6), help='optimization batch size')
 
@@ -141,8 +143,8 @@ if __name__ == "__main__":
     else:
         # initialized weights&biases summary
         run = wandb.init(project='distributed rl',
-                         group='atari pong',
-                         job_type='run100M',
+                         group=kwargs['wandb_group'],
+                         job_type=kwargs['wandb_job'],
                          name=kwargs['exp_name'],
                          entity='garrett4wade',
                          config=kwargs)
@@ -170,9 +172,9 @@ if __name__ == "__main__":
     # environments and send data into buffer via Ray backbone
     simulation_thread.start()
 
-    batch_queue = Queue(maxsize=config.q_size)
-    buffer_collector = BufferCollector(batch_queue, buffer, config.batch_size)
-    buffer_collector.start()
+    # batch_queue = Queue(maxsize=config.q_size)
+    # buffer_collector = BufferCollector(batch_queue, buffer, config.batch_size)
+    # buffer_collector.start()
 
     # main loop
     global_step = 0
@@ -183,7 +185,10 @@ if __name__ == "__main__":
         '''
         iter_start = time.time()
         # wait until there's enough data in buffer
-        data_batch = batch_queue.get()
+        data_batch = buffer.get(config.batch_size)
+        while data_batch is None:
+            data_batch = buffer.get(config.batch_size)
+        # data_batch = batch_queue.get()
         sample_time = time.time() - iter_start
 
         # pull from remote return recorder
@@ -223,7 +228,8 @@ if __name__ == "__main__":
         memory_stat = {
             'memory/memory': process.memory_info().rss / 1024**3,
             'memory/buffer_utilization': buffer.size() / buffer._maxsize,
-            'memory/batch_queue_utilization': batch_queue.qsize() / batch_queue.maxsize
+            # 'memory/batch_queue_utilization': batch_queue.qsize() / batch_queue.maxsize
+            'memory/buffer_received_sample': buffer.received_sample,
         }
         if not args.no_summary:
             # write summary into weights&biases
@@ -231,7 +237,8 @@ if __name__ == "__main__":
 
         del return_stat_job
         del return_record
-    run.finish()
+    if not args.no_summary:
+        run.finish()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
     print("############ experiment finished ############")
     print("############ prepare to shut down ray ############")

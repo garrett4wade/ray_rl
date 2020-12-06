@@ -78,6 +78,7 @@ class CircularBuffer:
         self._next_idx = 0
 
         self.used_times = []
+        self.received_sample = 0
 
     def size(self):
         return len(self._storage)
@@ -93,6 +94,7 @@ class CircularBuffer:
             self._storage[self._next_idx] = seg
             self.used_times[self._next_idx] = 0
         self._next_idx = (self._next_idx + 1) % self._maxsize
+        self.received_sample += 1
 
     def get(self, batch_size):
         if self.size() <= batch_size:
