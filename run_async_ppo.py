@@ -30,10 +30,6 @@ parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
 
 # environment
 parser.add_argument('--env_name', type=str, default='PongNoFrameskip-v4', help='name of env')
-# parser.add_argument('--use_subproc',
-#                     action='store_true',
-#                     default=False,
-#                     help='whether to use subprocess vectorized env')
 parser.add_argument('--env_num', type=int, default=2, help='number of evironments per worker')
 parser.add_argument('--total_frames', type=int, default=int(100e6), help='optimization batch size')
 
@@ -89,10 +85,7 @@ def build_worker_env(worker_id, kwargs):
         lambda: EnvWithMemory(build_simple_env, worker_id + i * kwargs['num_workers'], kwargs)
         for i in range(kwargs['num_workers'])
     ]
-    if kwargs['use_subproc']:
-        return SubprocVecEnvWithMemory(env_fns)
-    else:
-        return DummyVecEnvWithMemory(env_fns)
+    return DummyVecEnvWithMemory(env_fns)
 
 
 def build_worker_model(kwargs):
