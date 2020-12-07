@@ -9,10 +9,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-import os
-import psutil
-from pgrep import pgrep
-
 from rl_utils.simple_env import EnvWithMemory, DummyVecEnvWithMemory
 from rl_utils.buffer import CircularBuffer
 from model.model import ActorCritic
@@ -123,7 +119,6 @@ def train_learner_on_minibatch(learner, optimizer, data_batch, config):
 
 
 if __name__ == "__main__":
-    process = psutil.Process(os.getpid())
     exp_start_time = time.time()
 
     # set random seed
@@ -173,9 +168,6 @@ if __name__ == "__main__":
     # buffer_collector = BufferCollector(batch_queue, buffer, config.batch_size)
     # buffer_collector.start()
 
-    ray_proc_name = ['raylet', 'ray::Worker', 'ray::Param', 'ray::Ret']
-    ray_proc = None
-
     # main loop
     global_step = 0
     num_frames = 0
@@ -190,9 +182,6 @@ if __name__ == "__main__":
             data_batch = buffer.get(config.batch_size)
         # data_batch = batch_queue.get()
         sample_time = time.time() - iter_start
-
-        if ray_proc is None:
-            ray_proc = {k: [psutil.Process(pid) for pid in pgrep(k)] for k in ray_proc_name}
 
         # pull from remote return recorder
         return_stat_job = recorder.pull.remote()
@@ -228,28 +217,10 @@ if __name__ == "__main__":
         return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
         loss_stat = {'loss/' + k: np.mean(v) for k, v in loss_stat.items()}
         time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
-
-        ray_mem_info = {}
-        for k, procs in ray_proc.items():
-            rss, pss, uss = [], [], []
-            for proc in procs:
-                proc_meminfo = proc.memory_full_info()
-                rss.append(proc_meminfo.rss)
-                pss.append(proc_meminfo.pss)
-                uss.append(proc_meminfo.uss)
-            ray_mem_info['ray/' + k + '/mean_rss'] = np.mean(rss) / 1024**3
-            ray_mem_info['ray/' + k + '/total_pss'] = np.sum(pss) / 1024**3
-            ray_mem_info['ray/' + k + '/total_uss'] = np.sum(uss) / 1024**3
-
-        main_proc_meminfo = process.memory_full_info()
         memory_stat = {
-            'memory/main_rss': main_proc_meminfo.rss / 1024**3,
-            'memory/main_pss': main_proc_meminfo.pss / 1024**3,
-            'memory/main_uss': main_proc_meminfo.uss / 1024**3,
             'buffer/utilization': buffer.size() / buffer._maxsize,
             # 'buffer/batch_queue_utilization': batch_queue.qsize() / batch_queue.maxsize
             'buffer/received_sample': buffer.received_sample,
-            **ray_mem_info,
         }
 
         if not args.no_summary:
