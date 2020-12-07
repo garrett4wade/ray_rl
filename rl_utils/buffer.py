@@ -128,6 +128,7 @@ class CircularBuffer2:
 
         self.free_indices = list(range(maxsize))
         self.full_indices = []
+        self.received_sample = 0
 
     def size(self):
         return len(self.full_indices)
@@ -144,9 +145,10 @@ class CircularBuffer2:
         for k, v in data_batch.items():
             self._storage[k][indices] = v
 
-        self.free_indices = self.free_indices[batch_size:]
         self.full_indices.extend(self.free_indices[:batch_size])
+        self.free_indices = self.free_indices[batch_size:]
         self.used_times[indices] = 0
+        self.received_sample += batch_size
 
     def get(self, batch_size):
         if len(self.full_indices) < batch_size:

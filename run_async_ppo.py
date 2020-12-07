@@ -4,7 +4,6 @@ import time
 import wandb
 import argparse
 import numpy as np
-from queue import Queue
 
 import torch
 import torch.nn as nn
@@ -12,13 +11,16 @@ import torch.optim as optim
 
 import os
 import psutil
+from pgrep import pgrep
 
 from rl_utils.simple_env import EnvWithMemory, DummyVecEnvWithMemory
 from rl_utils.buffer import CircularBuffer
 from model.model import ActorCritic
 from ray_utils.ps import ParameterServer, ReturnRecorder
-from ray_utils.simulation_thread import SimulationThread, BufferCollector
 from ray.rllib.env.atari_wrappers import wrap_deepmind
+
+from queue import Queue
+from ray_utils.simulation_thread import SimulationThread, BufferCollector
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
@@ -56,7 +58,7 @@ parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal
 
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
-parser.add_argument('--num_workers', type=int, default=16, help='remote worker numbers')
+parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=4, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
 parser.add_argument('--q_size', type=int, default=16, help='number of batches in replay buffer')
@@ -83,7 +85,7 @@ del init_env
 def build_worker_env(worker_id, kwargs):
     env_fns = [
         lambda: EnvWithMemory(build_simple_env, worker_id + i * kwargs['num_workers'], kwargs)
-        for i in range(kwargs['num_workers'])
+        for i in range(kwargs['env_num'])
     ]
     return DummyVecEnvWithMemory(env_fns)
 
@@ -128,9 +130,6 @@ if __name__ == "__main__":
     torch.manual_seed(kwargs['seed'])
     np.random.seed(kwargs['seed'] + 13563)
 
-    # initialize ray
-    ray.init()
-
     if args.no_summary:
         config = args
     else:
@@ -143,14 +142,18 @@ if __name__ == "__main__":
                          config=kwargs)
         config = wandb.config
 
+    # initialize ray
+    # additional 2 cpus are for parameter server & main script respectively
+    ray.init(num_cpus=config.cpu_per_worker * config.num_workers + 2)
+
     # initialize learner, who is responsible for gradient update
     learner = build_learner_model(kwargs)
     optimizer = optim.Adam(learner.parameters(), lr=config.lr)
     init_weights = learner.get_weights()
 
     # initialize buffer
-    keys = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
-    buffer = CircularBuffer(config.batch_size * config.q_size, config.reuse_times, keys)
+    buffer_maxsize = config.batch_size * config.q_size
+    buffer = CircularBuffer(buffer_maxsize, config.reuse_times, keys)
 
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
@@ -169,6 +172,9 @@ if __name__ == "__main__":
     # buffer_collector = BufferCollector(batch_queue, buffer, config.batch_size)
     # buffer_collector.start()
 
+    ray_proc_name = ['raylet', 'ray::Worker', 'ray::Param', 'ray::Ret']
+    ray_proc = None
+
     # main loop
     global_step = 0
     num_frames = 0
@@ -183,6 +189,9 @@ if __name__ == "__main__":
             data_batch = buffer.get(config.batch_size)
         # data_batch = batch_queue.get()
         sample_time = time.time() - iter_start
+
+        if ray_proc is None:
+            ray_proc = {k: [psutil.Process(pid) for pid in pgrep(k)] for k in ray_proc_name}
 
         # pull from remote return recorder
         return_stat_job = recorder.pull.remote()
@@ -218,12 +227,30 @@ if __name__ == "__main__":
         return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
         loss_stat = {'loss/' + k: np.mean(v) for k, v in loss_stat.items()}
         time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
+
+        ray_mem_info = {}
+        for k, procs in ray_proc.items():
+            rss, pss, uss = [], [], []
+            for proc in procs:
+                proc_meminfo = proc.memory_full_info()
+                rss.append(proc_meminfo.rss)
+                pss.append(proc_meminfo.pss)
+                uss.append(proc_meminfo.uss)
+            ray_mem_info['ray/' + k + '/mean_rss'] = np.mean(rss) / 1024**3
+            ray_mem_info['ray/' + k + '/total_pss'] = np.sum(pss) / 1024**3
+            ray_mem_info['ray/' + k + '/total_uss'] = np.sum(uss) / 1024**3
+
+        main_proc_meminfo = process.memory_full_info()
         memory_stat = {
-            'memory/memory': process.memory_info().rss / 1024**3,
-            'memory/buffer_utilization': buffer.size() / buffer._maxsize,
-            # 'memory/batch_queue_utilization': batch_queue.qsize() / batch_queue.maxsize
-            'memory/buffer_received_sample': buffer.received_sample,
+            'memory/main_rss': main_proc_meminfo.rss / 1024**3,
+            'memory/main_pss': main_proc_meminfo.pss / 1024**3,
+            'memory/main_uss': main_proc_meminfo.uss / 1024**3,
+            'buffer/utilization': buffer.size() / buffer._maxsize,
+            # 'buffer/batch_queue_utilization': batch_queue.qsize() / batch_queue.maxsize
+            'buffer/received_sample': buffer.received_sample,
+            **ray_mem_info,
         }
+
         if not args.no_summary:
             # write summary into weights&biases
             wandb.log({**return_stat, **loss_stat, **time_stat, **memory_stat}, step=num_frames)
