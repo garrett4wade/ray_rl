@@ -152,6 +152,7 @@ if __name__ == "__main__":
     init_weights = learner.get_weights()
 
     # initialize buffer
+    keys = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
     buffer_maxsize = config.batch_size * config.q_size
     buffer = CircularBuffer(buffer_maxsize, config.reuse_times, keys)
 
