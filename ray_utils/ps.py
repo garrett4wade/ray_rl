@@ -9,11 +9,11 @@ class ParameterServer:
         self.weights = weights
         self.weights_hash = int(time.time())
 
-    def get_weights(self, hash_value):
-        if self.weights_hash != hash_value:
-            return self.weights, self.weights_hash
-        else:
-            return None
+    def pull(self):
+        return self.weights_hash
+
+    def get_weights(self):
+        return self.weights, self.weights_hash
 
     def set_weights(self, weights):
         self.weights = weights

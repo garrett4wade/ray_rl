@@ -1,14 +1,14 @@
 pkill -9 ray
 num_workers=32
 cpu_per_worker=1
-num_envs=(2 4 8 16)
-group_name="subproc"
-job_name="subproc"
+num_envs=(4 8 16)
+group_name="sample_speed"
+job_name="sample_speed"
 num_frames=4000000
 seed=562789
 for num_env in ${num_envs[@]}
 do
-    exp_name="env"${num_env}"worker"${num_workers}
+    exp_name="ver1_env"${num_env}"worker"${num_workers}
     echo "current experiment ${exp_name}"
     python run_async_ppo.py --exp_name ${exp_name} \
                             --wandb_group ${group_name} \
@@ -19,7 +19,6 @@ do
                             --num_workers ${num_workers} \
                             --cpu_per_worker ${cpu_per_worker} \
                             --q_size 16 \
-                            --gpu_id 0 \
-                            --use_subproc
+                            --gpu_id 0
     pkill -9 ray
 done

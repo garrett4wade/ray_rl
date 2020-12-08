@@ -25,19 +25,16 @@ class Worker:
 
     def get_new_weights(self):
         # if model parameters in parameter server is different from local model, download it
-        get_weights_job = self.ps.get_weights.remote(self.weight_hash)
-        result = ray.get(get_weights_job)
-        if result is not None:
-            self.model.load_state_dict(result[0])
-            old_hash = self.weight_hash
-            self.weight_hash = result[1]
-            print("Worker {} load state dict, "
-                  "hashing changed from "
-                  "{} to {}".format(self.id, old_hash, self.weight_hash))
-        del get_weights_job
-        del result
+        weights, weights_hash = ray.get(self.ps.get_weights.remote())
+        self.model.load_state_dict(weights)
+        old_hash = self.weight_hash
+        self.weight_hash = weights_hash
+        print("Worker {} load state dict, "
+              "hashing changed from "
+              "{} to {}".format(self.id, old_hash, self.weight_hash))
 
     def _data_generator(self):
+        self.pull_job = self.ps.pull.remote()
         model_inputs = self.env.get_model_inputs()
         while True:
             actions, action_logits, values = self.model.select_action(*model_inputs)
@@ -46,7 +43,9 @@ class Worker:
                 continue
             yield (data_batches, ep_returns)
             # get new weights only when at least one of vectorized envs is done
-            self.get_new_weights()
+            if ray.get(self.pull_job) != self.weight_hash:
+                self.get_new_weights()
+            self.pull_job = self.ps.pull.remote()
 
     def get(self):
         return next(self._data_g)
@@ -63,35 +62,39 @@ class RolloutCollector:
                                                                          ps=ps,
                                                                          kwargs=kwargs) for i in range(self.num_workers)
         ]
+        self.working_jobs = []
+        # job_hashing maps job id to worker index
+        self.job_hashing = {}
+
         self._data_id_g = self._data_id_generator(num_returns=kwargs['num_returns'])
         print("###################################################")
         print("############# Workers starting ...... #############")
         print("###################################################")
 
+    def _start(self):
+        for i in range(self.num_workers):
+            job = self.workers[i].get.remote()
+            self.working_jobs.append(job)
+            self.job_hashing[job] = i
+
     def _data_id_generator(self, num_returns, timeout=None):
         # iteratively make worker active
-        self.worker_done = [True for _ in range(self.num_workers)]
-        self.working_job_ids = []
-        self.id2job_idx = dict()
+        self._start()
         while True:
-            for i in range(self.num_workers):
-                if self.worker_done[i]:
-                    job_id = self.workers[i].get.remote()
-                    self.working_job_ids.append(job_id)
-                    self.id2job_idx[job_id] = i
-                    self.worker_done[i] = False
+            ready_jobs, self.working_jobs = ray.wait(self.working_jobs, num_returns=num_returns, timeout=timeout)
 
-            ready_ids, self.working_job_ids = ray.wait(self.working_job_ids, num_returns=num_returns, timeout=timeout)
+            for ready_job in ready_jobs:
+                worker_id = self.job_hashing[ready_job]
+                self.job_hashing.pop(ready_job)
 
-            for ready_id in ready_ids:
-                self.worker_done[self.id2job_idx[ready_id]] = True
-                self.id2job_idx.pop(ready_id)
+                new_job = self.workers[worker_id].get.remote()
+                self.working_jobs.append(new_job)
+                self.job_hashing[new_job] = worker_id
 
-            yield ready_ids
+            yield ready_jobs
 
     def get_sample_ids(self):
-        ready_ids = next(self._data_id_g)
-        return ready_ids
+        return next(self._data_id_g)
 
 
 class SimulationThread(Thread):
