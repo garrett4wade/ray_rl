@@ -1,5 +1,7 @@
 import ray
+import time
 import itertools
+import warnings
 from copy import deepcopy
 from queue import Queue
 from threading import Thread
@@ -16,6 +18,8 @@ class Worker:
 
         self.env = worker_env_fn(worker_id, kwargs)
         self.model = model_fn(kwargs)
+        # self.model_input_queue = Queue(maxsize=self.num_env_copies)
+        # self.output_queue = Queue(maxsize=self.num_env_copies)
 
         self.ps = ps
         self.weight_hash = None
@@ -23,19 +27,46 @@ class Worker:
 
         self._data_g = self._data_generator()
 
+    # def inference(self):
+    #     while True:
+    #         model_inputs, env_id = self.model_input_queue.get()
+    #         start = time.time()
+    #         model_outputs = self.model.select_action(*model_inputs)
+    #         infer_time = time.time() - start
+    #         self.env_queues[env_id].put(model_outputs)
+
+    # def rollout(self, env_id):
+    #     while True:
+    #         model_outputs = self.env_queues[env_id].get()
+    #         start = time.time()
+    #         data_batches, ep_returns, model_inputs = self.envs[env_id].step(*model_outputs)
+    #         rollout_time = time.time() - start
+    #         self.model_input_queue.put((model_inputs, env_id))
+    #         if len(data_batches) != 0:
+    #             self.output_queue.put((data_batches, ep_returns))
+
     def get_new_weights(self):
         # if model parameters in parameter server is different from local model, download it
-        weights, weights_hash = ray.get(self.ps.get_weights.remote())
+        weights_job = self.ps.get_weights.remote()
+        weights, weights_hash = ray.get(weights_job)
         self.model.load_state_dict(weights)
         old_hash = self.weight_hash
         self.weight_hash = weights_hash
         print("Worker {} load state dict, "
               "hashing changed from "
               "{} to {}".format(self.id, old_hash, self.weight_hash))
+        del weights_job, weights, weights_hash
 
     def _data_generator(self):
         self.pull_job = self.ps.pull.remote()
         model_inputs = self.env.get_model_inputs()
+        # for i, env in enumerate(self.envs):
+        #     self.model_input_queue.put((env.get_model_inputs(), i))
+        # infer_job = Thread(target=self.inference)
+        # infer_job.start()
+        # rollout_jobs = [Thread(target=self.rollout, args=(i, )) for i in range(self.num_env_copies)]
+        # for rollout_job in rollout_jobs:
+        #     rollout_job.start()
         while True:
             actions, action_logits, values = self.model.select_action(*model_inputs)
             data_batches, ep_returns, model_inputs = self.env.step(actions, action_logits, values)
@@ -128,9 +159,7 @@ class SimulationThread(Thread):
             ray.get(push_job)
             # del object references & ray.get returns
             # hopefully this can delete object in ray object store
-            del push_job
-            del ready_sample_ids
-            del all_batch_return
+            del push_job, ready_sample_ids, all_batch_return
 
 
 class BufferCollector(Thread):

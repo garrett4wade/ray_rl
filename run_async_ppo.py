@@ -28,7 +28,8 @@ parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
 
 # environment
 parser.add_argument('--env_name', type=str, default='PongNoFrameskip-v4', help='name of env')
-parser.add_argument('--env_num', type=int, default=2, help='number of evironments per worker')
+parser.add_argument('--env_num', type=int, default=2, help='# evironments per worker')
+parser.add_argument('--env_split', type=int, default=2, help='# splitted vectorized env copies per worker')
 parser.add_argument('--total_frames', type=int, default=int(100e6), help='optimization batch size')
 
 # important parameters of model and algorithm
@@ -79,6 +80,7 @@ del init_env
 
 
 def build_worker_env(worker_id, kwargs):
+    assert kwargs['env_num'] % kwargs['env_split'] == 0
     env_fns = [
         lambda: EnvWithMemory(build_simple_env, worker_id + i * kwargs['num_workers'], kwargs)
         for i in range(kwargs['env_num'])
