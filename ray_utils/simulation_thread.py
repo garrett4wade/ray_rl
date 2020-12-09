@@ -1,7 +1,5 @@
 import ray
-import time
 import itertools
-import warnings
 from copy import deepcopy
 from queue import Queue
 from threading import Thread
@@ -18,32 +16,12 @@ class Worker:
 
         self.env = worker_env_fn(worker_id, kwargs)
         self.model = model_fn(kwargs)
-        # self.model_input_queue = Queue(maxsize=self.num_env_copies)
-        # self.output_queue = Queue(maxsize=self.num_env_copies)
 
         self.ps = ps
         self.weight_hash = None
         self.get_new_weights()
 
         self._data_g = self._data_generator()
-
-    # def inference(self):
-    #     while True:
-    #         model_inputs, env_id = self.model_input_queue.get()
-    #         start = time.time()
-    #         model_outputs = self.model.select_action(*model_inputs)
-    #         infer_time = time.time() - start
-    #         self.env_queues[env_id].put(model_outputs)
-
-    # def rollout(self, env_id):
-    #     while True:
-    #         model_outputs = self.env_queues[env_id].get()
-    #         start = time.time()
-    #         data_batches, ep_returns, model_inputs = self.envs[env_id].step(*model_outputs)
-    #         rollout_time = time.time() - start
-    #         self.model_input_queue.put((model_inputs, env_id))
-    #         if len(data_batches) != 0:
-    #             self.output_queue.put((data_batches, ep_returns))
 
     def get_new_weights(self):
         # if model parameters in parameter server is different from local model, download it
@@ -60,13 +38,6 @@ class Worker:
     def _data_generator(self):
         self.pull_job = self.ps.pull.remote()
         model_inputs = self.env.get_model_inputs()
-        # for i, env in enumerate(self.envs):
-        #     self.model_input_queue.put((env.get_model_inputs(), i))
-        # infer_job = Thread(target=self.inference)
-        # infer_job.start()
-        # rollout_jobs = [Thread(target=self.rollout, args=(i, )) for i in range(self.num_env_copies)]
-        # for rollout_job in rollout_jobs:
-        #     rollout_job.start()
         while True:
             actions, action_logits, values = self.model.select_action(*model_inputs)
             data_batches, ep_returns, model_inputs = self.env.step(actions, action_logits, values)
@@ -109,10 +80,13 @@ class RolloutCollector:
             self.job_hashing[job] = i
 
     def _data_id_generator(self, num_returns, timeout=None):
+        import time
         # iteratively make worker active
         self._start()
         while True:
+            start = time.time()
             ready_jobs, self.working_jobs = ray.wait(self.working_jobs, num_returns=num_returns, timeout=timeout)
+            wait_time = time.time() - start
 
             for ready_job in ready_jobs:
                 worker_id = self.job_hashing[ready_job]
@@ -122,7 +96,7 @@ class RolloutCollector:
                 self.working_jobs.append(new_job)
                 self.job_hashing[new_job] = worker_id
 
-            yield ready_jobs
+            yield ready_jobs, wait_time
 
     def get_sample_ids(self):
         return next(self._data_id_g)
@@ -136,6 +110,7 @@ class SimulationThread(Thread):
         self.recorder = recorder
         self.ready_id_queue = Queue(maxsize=128)
         self.daemon = True
+        self.wait_times = []
 
     def sample_from_rollout_collector(self):
         while True:
@@ -148,7 +123,8 @@ class SimulationThread(Thread):
         sample_job.start()
 
         while True:
-            ready_sample_ids = self.ready_id_queue.get()
+            ready_sample_ids, wait_time = self.ready_id_queue.get()
+            self.wait_times.append(wait_time)
             all_batch_return = ray.get(ready_sample_ids)
 
             nested_data_batches, nested_ep_returns = zip(*deepcopy(all_batch_return))
@@ -160,6 +136,12 @@ class SimulationThread(Thread):
             # del object references & ray.get returns
             # hopefully this can delete object in ray object store
             del push_job, ready_sample_ids, all_batch_return
+
+    def get_wait_time(self):
+        import numpy as np
+        t = np.mean(self.wait_times)
+        self.wait_times = []
+        return t
 
 
 class BufferCollector(Thread):

@@ -56,7 +56,7 @@ parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
-parser.add_argument('--num_returns', type=int, default=4, help='number of returns in ray.wait')
+parser.add_argument('--num_returns', type=int, default=1, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
 parser.add_argument('--q_size', type=int, default=16, help='number of batches in replay buffer')
 
@@ -220,9 +220,15 @@ if __name__ == "__main__":
         loss_stat = {'loss/' + k: np.mean(v) for k, v in loss_stat.items()}
         time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
         memory_stat = {
-            'buffer/utilization': buffer.size() / buffer._maxsize,
+            'buffer/utilization':
+            buffer.size() / buffer._maxsize,
             # 'buffer/batch_queue_utilization': batch_queue.qsize() / batch_queue.maxsize
-            'buffer/received_sample': buffer.received_sample,
+            'buffer/received_sample':
+            buffer.received_sample,
+            'buffer/ready_id_queue_util':
+            simulation_thread.ready_id_queue.qsize() / simulation_thread.ready_id_queue.maxsize,
+            'buffer/ray_wait_time':
+            simulation_thread.get_wait_time()
         }
 
         if not args.no_summary:
