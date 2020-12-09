@@ -50,7 +50,7 @@ parser.add_argument('--burn_in_len', type=int, default=0, help='rnn hidden state
 parser.add_argument('--chunk_len', type=int, default=16, help='rnn BPTT chunk length')
 parser.add_argument('--replay', type=int, default=1, help='sequence cross-replay times')
 parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode maximum timesteps')
-parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal chunk number before env.collect')
+parser.add_argument('--min_return_chunk_num', type=int, default=64, help='minimal chunk number before env.collect')
 
 # Ray distributed training parameters
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')

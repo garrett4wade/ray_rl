@@ -18,7 +18,11 @@ class EnvWithMemory:
             self.is_continuous = False
         assert not self.is_continuous, "this branch is for Atari game, environment action space must be discrete"
 
+        self.history_data_batches = []
+        self.history_ep_returns = []
+
         self.chunk_len = kwargs['chunk_len']
+        self.min_return_chunk_num = kwargs['min_return_chunk_num']
 
         self.gamma = kwargs['gamma']
         self.lmbda = kwargs['lmbda']
@@ -28,8 +32,8 @@ class EnvWithMemory:
         self.reset()
 
     def reset(self):
-        if self.done:
-            print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
+        # if self.done:
+        #     print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
         self.obs = self.preprocess_obs(self.env.reset())
         self.done = False
         self.ep_step = self.ep_return = 0
@@ -44,10 +48,17 @@ class EnvWithMemory:
         if self.done:
             # if env is done in the previous step, use bootstrap value
             # to compute gae and collect history data
-            data_batches = self.collect(value)
-            ep_return = self.ep_return
+            self.history_data_batches += self.collect(value)
+            self.history_ep_returns.append(self.ep_return)
             self.reset()
-            return data_batches, ep_return, (self.obs, )
+            if len(self.history_data_batches) >= self.min_return_chunk_num:
+                data_batches = self.history_data_batches
+                ep_returns = self.history_ep_returns
+                self.history_databatches = []
+                self.history_ep_returns = []
+                return data_batches, ep_returns, (self.obs, )
+            else:
+                return [], [], (self.obs, )
 
         n_obs, r, d, _ = self.env.step(action)
         n_obs = self.preprocess_obs(n_obs)
@@ -63,7 +74,7 @@ class EnvWithMemory:
 
         self.obs = n_obs
         self.done = d or self.ep_step >= self.max_timesteps
-        return [], None, (self.obs, )
+        return [], [], (self.obs, )
 
     def collect(self, bootstrap_value):
         v_target, adv = self.compute_gae(bootstrap_value)
@@ -112,11 +123,11 @@ class DummyVecEnvWithMemory:
     def step(self, actions, action_logits, values):
         data_batches, ep_returns, model_inputs = [], [], []
         for i, env in enumerate(self.envs):
-            cur_data_batches, cur_ep_return, model_input = env.step(actions[i], action_logits[i], values[i])
+            cur_data_batches, cur_ep_returns, model_input = env.step(actions[i], action_logits[i], values[i])
             if len(cur_data_batches) > 0:
                 data_batches += cur_data_batches
-            if cur_ep_return is not None:
-                ep_returns.append(cur_ep_return)
+            if len(cur_ep_returns) > 0:
+                ep_returns += cur_ep_returns
             model_inputs.append(model_input)
         stacked_model_inputs = []
         for inp in zip(*model_inputs):

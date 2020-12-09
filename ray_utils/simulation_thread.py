@@ -28,11 +28,11 @@ class Worker:
         weights_job = self.ps.get_weights.remote()
         weights, weights_hash = ray.get(weights_job)
         self.model.load_state_dict(weights)
-        old_hash = self.weight_hash
+        # old_hash = self.weight_hash
         self.weight_hash = weights_hash
-        print("Worker {} load state dict, "
-              "hashing changed from "
-              "{} to {}".format(self.id, old_hash, self.weight_hash))
+        # print("Worker {} load state dict, "
+        #       "hashing changed from "
+        #       "{} to {}".format(self.id, old_hash, self.weight_hash))
         del weights_job, weights, weights_hash
 
     def _data_generator(self):
