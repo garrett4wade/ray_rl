@@ -42,13 +42,12 @@ parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lmbda', type=float, default=0.95, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
 parser.add_argument('--reuse_times', type=int, default=2, help='sample reuse times')
-parser.add_argument('--n_minibatch', type=int, default=4, help='update times in each training step')
 parser.add_argument('--max_grad_norm', type=float, default=0.5, help='maximum gradient norm')
 parser.add_argument('--use_vtrace', type=bool, default=False, help='whether to use vtrace')
 
 # recurrent model parameters
 parser.add_argument('--burn_in_len', type=int, default=0, help='rnn hidden state burn-in length')
-parser.add_argument('--chunk_len', type=int, default=64, help='rnn BPTT chunk length')
+parser.add_argument('--chunk_len', type=int, default=16, help='rnn BPTT chunk length')
 parser.add_argument('--replay', type=int, default=1, help='sequence cross-replay times')
 parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode maximum timesteps')
 parser.add_argument('--min_return_chunk_num', type=int, default=5, help='minimal chunk number before env.collect')
@@ -100,24 +99,17 @@ def build_learner_model(kwargs):
     return ActorCritic(True, kwargs)
 
 
-def train_learner_on_minibatch(learner, optimizer, data_batch, config):
-    batch_size = config.batch_size
-    n_minibatch = config.n_minibatch
-    stat = dict(v_loss=[], p_loss=[], entropy_loss=[], grad_norm=[])
-    minibatch_idxes = torch.split(torch.randperm(batch_size), batch_size // n_minibatch)
-    for idx in minibatch_idxes:
-        optimizer.zero_grad()
-        v_loss, p_loss, entropy_loss = learner.compute_loss(**{k: v[idx] for k, v in data_batch.items()})
-        loss = p_loss + config.value_coef * v_loss + config.entropy_coef * entropy_loss
-        loss.backward()
-        grad_norm = nn.utils.clip_grad_norm_(learner.parameters(), config.max_grad_norm)
-        optimizer.step()
-
-        stat['v_loss'].append(v_loss.item())
-        stat['p_loss'].append(p_loss.item())
-        stat['entropy_loss'].append(entropy_loss.item())
-        stat['grad_norm'].append(grad_norm.item())
-    return {k: np.mean(v) for k, v in stat.items()}
+def train_learner_on_batch(learner, optimizer, data_batch, config):
+    optimizer.zero_grad()
+    v_loss, p_loss, entropy_loss = learner.compute_loss(**data_batch)
+    loss = p_loss + config.value_coef * v_loss + config.entropy_coef * entropy_loss
+    loss.backward()
+    grad_norm = nn.utils.clip_grad_norm_(learner.parameters(), config.max_grad_norm)
+    optimizer.step()
+    return dict(v_loss=v_loss.item(),
+                p_loss=p_loss.item(),
+                entropy_loss=entropy_loss.item(),
+                grad_norm=grad_norm.item())
 
 
 if __name__ == "__main__":
@@ -197,7 +189,7 @@ if __name__ == "__main__":
         for k, v in data_batch.items():
             data_batch[k] = torch.from_numpy(v).to(**learner.tpdv)
         # train learner
-        loss_stat = train_learner_on_minibatch(learner, optimizer, data_batch, config)
+        loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)
         optimize_time = time.time() - start
 
         # upload updated learner parameter to parameter server
@@ -217,18 +209,15 @@ if __name__ == "__main__":
 
         # collect statistics to record
         return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
-        loss_stat = {'loss/' + k: np.mean(v) for k, v in loss_stat.items()}
+        loss_stat = {'loss/' + k: v for k, v in loss_stat.items()}
         time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
         memory_stat = {
-            'buffer/utilization':
-            buffer.size() / buffer._maxsize,
+            'buffer/utilization': buffer.size() / buffer._maxsize,
             # 'buffer/batch_queue_utilization': batch_queue.qsize() / batch_queue.maxsize
-            'buffer/received_sample':
-            buffer.received_sample,
+            'buffer/received_sample': buffer.received_sample,
             'buffer/ready_id_queue_util':
             simulation_thread.ready_id_queue.qsize() / simulation_thread.ready_id_queue.maxsize,
-            'buffer/ray_wait_time':
-            simulation_thread.get_wait_time()
+            'buffer/ray_wait_time': simulation_thread.get_wait_time()
         }
 
         if not args.no_summary:

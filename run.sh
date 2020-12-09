@@ -22,8 +22,9 @@ do
                                 --num_workers ${num_workers} \
                                 --cpu_per_worker ${cpu_per_worker} \
                                 --q_size 16 \
-                                --gpu_id 0 \
-                                --num_returns ${num_return}
+                                --gpu_id 1 \
+                                --num_returns ${num_return} \
+                                --no_summary
         pkill -9 ray
     done
 done
