@@ -217,18 +217,16 @@ if __name__ == "__main__":
             'buffer/received_sample': buffer.received_sample,
             'buffer/ready_id_queue_util':
             simulation_thread.ready_id_queue.qsize() / simulation_thread.ready_id_queue.maxsize,
-            'buffer/ray_wait_time': simulation_thread.get_wait_time()
+            'buffer/ray_wait_time': simulation_thread.get_wait_time(),
+            'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
         }
 
         if not args.no_summary:
             # write summary into weights&biases
             wandb.log({**return_stat, **loss_stat, **time_stat, **memory_stat}, step=num_frames)
 
-        del return_stat_job
-        del return_record
+        del return_stat_job, return_record
     if not args.no_summary:
         run.finish()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
-    print("############ experiment finished ############")
-    print("############ prepare to shut down ray ############")
     ray.shutdown()

@@ -1,5 +1,5 @@
 pkill -9 ray
-num_workers=16
+num_workers=48
 cpu_per_worker=1
 num_envs=(16)
 num_returns=(1)
@@ -23,8 +23,7 @@ do
                                 --cpu_per_worker ${cpu_per_worker} \
                                 --q_size 16 \
                                 --gpu_id 1 \
-                                --num_returns ${num_return} \
-                                --no_summary
+                                --num_returns ${num_return}
         pkill -9 ray
     done
 done
