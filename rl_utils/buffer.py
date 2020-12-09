@@ -86,6 +86,15 @@ class CircularBuffer:
     def __len__(self):
         return len(self._storage)
 
+    def put_batch(self, segs):
+        self._storage += segs
+        self.used_times += [0 for _ in range(len(segs))]
+        if len(self._storage) > self._maxsize:
+            self._storage = self._storage[-self._maxsize:]
+            self.used_times = self.used_times[-self._maxsize:]
+        # self._next_idx = len(self._storage) % self._maxsize
+        self.received_sample += len(segs)
+
     def put(self, seg):
         if self._next_idx >= len(self._storage):
             self._storage.append(seg)
