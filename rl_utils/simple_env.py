@@ -54,7 +54,7 @@ class EnvWithMemory:
             if len(self.history_data_batches) >= self.min_return_chunk_num:
                 data_batches = self.history_data_batches
                 ep_returns = self.history_ep_returns
-                self.history_databatches = []
+                self.history_data_batches = []
                 self.history_ep_returns = []
                 return data_batches, ep_returns, (self.obs, )
             else:

@@ -9,6 +9,10 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+import os
+import psutil
+from pgrep import pgrep
+
 from rl_utils.simple_env import EnvWithMemory, DummyVecEnvWithMemory
 from rl_utils.buffer import CircularBuffer
 from model.model import ActorCritic
@@ -24,6 +28,7 @@ parser.add_argument("--exp_name", type=str, default='ray_test0', help='experimen
 parser.add_argument("--wandb_group", type=str, default='atari pong', help='weights & biases group name')
 parser.add_argument("--wandb_job", type=str, default='run 100M', help='weights & biases job name')
 parser.add_argument("--no_summary", action='store_true', default=False, help='whether to write summary')
+parser.add_argument("--record_mem", action='store_true', default=False, help='whether to store mem info, which is slow')
 parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
 
 # environment
@@ -113,6 +118,8 @@ def train_learner_on_batch(learner, optimizer, data_batch, config):
 
 
 if __name__ == "__main__":
+    if kwargs['record_mem']:
+        process = psutil.Process(os.getpid())
     exp_start_time = time.time()
 
     # set random seed
@@ -162,6 +169,9 @@ if __name__ == "__main__":
     # buffer_collector = BufferCollector(batch_queue, buffer, config.batch_size)
     # buffer_collector.start()
 
+    ray_proc_name = ['ray::Worker']  # , 'raylet', 'ray::Param', 'ray::Ret']
+    ray_proc = None
+
     # main loop
     global_step = 0
     num_frames = 0
@@ -176,6 +186,9 @@ if __name__ == "__main__":
             data_batch = buffer.get(config.batch_size)
         # data_batch = batch_queue.get()
         sample_time = time.time() - iter_start
+
+        if ray_proc is None and config.record_mem:
+            ray_proc = {k: [psutil.Process(pid) for pid in pgrep(k)] for k in ray_proc_name}
 
         # pull from remote return recorder
         return_stat_job = recorder.pull.remote()
@@ -211,14 +224,39 @@ if __name__ == "__main__":
         return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
         loss_stat = {'loss/' + k: v for k, v in loss_stat.items()}
         time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
+
+        ray_mem_info, main_mem_info = {}, {}
+        if config.record_mem:
+            for k, procs in ray_proc.items():
+                rss, pss, uss, cpu_per = [], [], [], []
+                for proc in procs:
+                    proc_meminfo = proc.memory_full_info()
+                    rss.append(proc_meminfo.rss)
+                    pss.append(proc_meminfo.pss)
+                    uss.append(proc_meminfo.uss)
+                    cpu_per.append(proc.cpu_percent() / 100)
+                ray_mem_info['ray/' + k + '/mean_rss'] = np.mean(rss) / 1024**3
+                ray_mem_info['ray/' + k + '/total_pss'] = np.sum(pss) / 1024**3
+                ray_mem_info['ray/' + k + '/total_uss'] = np.sum(uss) / 1024**3
+                ray_mem_info['ray/' + k + '/cpu_util'] = np.mean(cpu_per)
+
+            main_proc_meminfo = process.memory_full_info()
+            main_mem_info = {
+                'memory/main_rss': main_proc_meminfo.rss / 1024**3,
+                'memory/main_pss': main_proc_meminfo.pss / 1024**3,
+                'memory/main_uss': main_proc_meminfo.uss / 1024**3,
+                'memory/cpu_util': process.cpu_percent() / 100,
+            }
         memory_stat = {
             'buffer/utilization': buffer.size() / buffer._maxsize,
             # 'buffer/batch_queue_utilization': batch_queue.qsize() / batch_queue.maxsize
             'buffer/received_sample': buffer.received_sample,
+            'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
             'buffer/ready_id_queue_util':
             simulation_thread.ready_id_queue.qsize() / simulation_thread.ready_id_queue.maxsize,
             'buffer/ray_wait_time': simulation_thread.get_wait_time(),
-            'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
+            **ray_mem_info,
+            **main_mem_info,
         }
 
         if not args.no_summary:
