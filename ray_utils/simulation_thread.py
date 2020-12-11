@@ -130,8 +130,6 @@ class SimulationThread(Thread):
             nested_data_batches, nested_ep_returns = zip(*deepcopy(all_batch_return))
             push_job = self.recorder.push.remote(list(itertools.chain.from_iterable(nested_ep_returns)))
             self.global_buffer.put_batch(list(itertools.chain.from_iterable(nested_data_batches)))
-            # for data_batch in itertools.chain.from_iterable(nested_data_batches):
-            #     self.global_buffer.put(data_batch)
 
             ray.get(push_job)
             # del object references & ray.get returns
