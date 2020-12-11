@@ -52,6 +52,9 @@ class Worker:
     def get(self):
         return next(self._data_g)
 
+    def close_env(self):
+        self.env.close()
+
 
 class RolloutCollector:
     def __init__(self, model_fn, worker_env_fn, ps, kwargs):
@@ -100,6 +103,13 @@ class RolloutCollector:
 
     def get_sample_ids(self):
         return next(self._data_id_g)
+
+    def close_env(self):
+        close_jobs = []
+        for worker in self.workers:
+            close_jobs.append(worker.close_env.remote())
+        while close_jobs:
+            _, close_jobs = ray.wait(close_jobs, num_returns=1)
 
 
 class SimulationThread(Thread):

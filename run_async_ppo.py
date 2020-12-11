@@ -1,4 +1,3 @@
-import gym
 import ray
 import time
 import wandb
@@ -13,14 +12,13 @@ import os
 import psutil
 from pgrep import pgrep
 
-from rl_utils.simple_env import EnvWithMemory, DummyVecEnvWithMemory
+from rl_utils.simple_env import EnvWithMemory, DummyVecEnvWithMemory, GymStarCraft2Env
 from rl_utils.buffer import CircularBuffer
 from model.model import ActorCritic
 from ray_utils.ps import ParameterServer, ReturnRecorder
-from ray.rllib.env.atari_wrappers import wrap_deepmind
 
-from queue import Queue
-from ray_utils.simulation_thread import SimulationThread, BufferCollector
+# from queue import Queue
+# from ray_utils.simulation_thread import SimulationThread, BufferCollector
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
@@ -32,9 +30,8 @@ parser.add_argument("--record_mem", action='store_true', default=False, help='wh
 parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
 
 # environment
-parser.add_argument('--env_name', type=str, default='PongNoFrameskip-v4', help='name of env')
+parser.add_argument('--env_name', type=str, default='3m', help='name of env')
 parser.add_argument('--env_num', type=int, default=2, help='# evironments per worker')
-parser.add_argument('--env_split', type=int, default=2, help='# splitted vectorized env copies per worker')
 parser.add_argument('--total_frames', type=int, default=int(100e6), help='optimization batch size')
 
 # important parameters of model and algorithm
@@ -71,24 +68,26 @@ args = parser.parse_args()
 kwargs = vars(args)
 
 
-def build_simple_env(kwargs):
-    return wrap_deepmind(gym.make(kwargs['env_name']), dim=42)
+def build_simple_env(kwargs, seed=0):
+    return GymStarCraft2Env(map_name=kwargs['env_name'], seed=seed)
 
 
 # get state/action information from env
 init_env = build_simple_env(kwargs)
-kwargs['state_dim'] = (42, 42, 4)
-kwargs['action_dim'] = init_env.action_space.n
+env_info = init_env.get_env_info()
+kwargs['obs_dim'] = env_info['obs_shape']
+kwargs['state_dim'] = env_info['state_shape']
+kwargs['action_dim'] = env_info['n_actions']
 kwargs['continuous_env'] = False
 del init_env
 
 
 def build_worker_env(worker_id, kwargs):
-    assert kwargs['env_num'] % kwargs['env_split'] == 0
-    env_fns = [
-        lambda: EnvWithMemory(build_simple_env, worker_id + i * kwargs['num_workers'], kwargs)
-        for i in range(kwargs['env_num'])
-    ]
+    env_fns = []
+    for i in range(kwargs['env_num']):
+        env_id = worker_id + i * kwargs['num_workers']
+        seed = 12345 * env_id + kwargs['seed']
+        env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), kwargs))
     return DummyVecEnvWithMemory(env_fns)
 
 
@@ -148,7 +147,7 @@ if __name__ == "__main__":
     init_weights = learner.get_weights()
 
     # initialize buffer
-    keys = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
+    keys = ['obs', 'state', 'action', 'action_logits', 'avail_action', 'value', 'adv', 'value_target']
     buffer_maxsize = config.batch_size * config.q_size
     buffer = CircularBuffer(buffer_maxsize, config.reuse_times, keys)
 
@@ -272,5 +271,6 @@ if __name__ == "__main__":
         del return_stat_job, return_record
     if not args.no_summary:
         run.finish()
+    simulation_thread.rollout_collector.close_env()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
     ray.shutdown()

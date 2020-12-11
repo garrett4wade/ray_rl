@@ -1,22 +1,30 @@
 import numpy as np
 from scipy.signal import lfilter
-from gym.spaces.box import Box
-from gym.spaces.discrete import Discrete
+from smac.env import StarCraft2Env
 
-ROLLOUT_KEYS = ['obs', 'action', 'action_logits', 'value', 'reward']
-COLLECT_KEYS = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
+
+class GymStarCraft2Env(StarCraft2Env):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def reset(self):
+        super().reset()
+        return np.stack(self.get_obs()), self.get_state(), np.stack(self.get_avail_actions())
+
+    def step(self, actions):
+        r, d, info = super().step(actions)
+        return np.stack(self.get_obs()), self.get_state(), np.stack(self.get_avail_actions()), r, d, info
+
+
+ROLLOUT_KEYS = ['obs', 'state', 'action', 'action_logits', 'avail_action', 'value', 'reward']
+COLLECT_KEYS = ['obs', 'state', 'action', 'action_logits', 'avail_action', 'value', 'adv', 'value_target']
 
 
 class EnvWithMemory:
-    def __init__(self, env_fn, env_id, kwargs):
+    def __init__(self, env_fn, kwargs):
         self.env = env_fn(kwargs)
-        self.env.seed(env_id * 12345 + kwargs['seed'])
 
-        if isinstance(self.env.action_space, Box):
-            self.is_continuous = True
-        elif isinstance(self.env.action_space, Discrete):
-            self.is_continuous = False
-        assert not self.is_continuous, "this branch is for Atari game, environment action space must be discrete"
+        self.is_continuous = False
 
         self.history_data_batches = []
         self.history_ep_returns = []
@@ -34,7 +42,7 @@ class EnvWithMemory:
     def reset(self):
         # if self.done:
         #     print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
-        self.obs = self.preprocess_obs(self.env.reset())
+        self.obs, self.state, self.avail_action = self.preprocess(*self.env.reset())
         self.done = False
         self.ep_step = self.ep_return = 0
         self.reset_history()
@@ -56,25 +64,29 @@ class EnvWithMemory:
                 ep_returns = self.history_ep_returns
                 self.history_data_batches = []
                 self.history_ep_returns = []
-                return data_batches, ep_returns, (self.obs, )
+                return data_batches, ep_returns, (self.obs, self.state, self.avail_action)
             else:
-                return [], [], (self.obs, )
+                return [], [], (self.obs, self.state, self.avail_action)
 
-        n_obs, r, d, _ = self.env.step(action)
-        n_obs = self.preprocess_obs(n_obs)
+        n_obs, n_state, n_avail_action, r, d, _ = self.env.step(action)
+        n_obs, n_state, n_avail_action = self.preprocess(n_obs, n_state, n_avail_action)
 
         self.ep_return += r
         self.ep_step += 1
 
         self.history['obs'].append(self.obs)
+        self.history['state'].append(self.state)
         self.history['action'].append(action)
         self.history['action_logits'].append(action_logits)
+        self.history['avail_action'].append(self.avail_action)
         self.history['reward'].append(r)
         self.history['value'].append(value)
 
         self.obs = n_obs
+        self.state = n_state
+        self.avail_action = n_avail_action
         self.done = d or self.ep_step >= self.max_timesteps
-        return [], [], (self.obs, )
+        return [], [], (self.obs, self.state, self.avail_action)
 
     def collect(self, bootstrap_value):
         v_target, adv = self.compute_gae(bootstrap_value)
@@ -102,9 +114,8 @@ class EnvWithMemory:
                 chunk[k] = splitted_v[i]
         return chunks
 
-    def preprocess_obs(self, obs):
-        obs = np.transpose(obs, [2, 0, 1]).astype(np.float32)
-        return (obs - 128.0) / 128.0
+    def preprocess(self, obs, state, avail_action):
+        return obs.astype(np.float32), state.astype(np.float32), avail_action.astype(np.float32)
 
     def compute_gae(self, bootstrap_value):
         discounted_r = lfilter([1], [1, -self.gamma], self.history['reward'][::-1])[::-1]
@@ -135,4 +146,10 @@ class DummyVecEnvWithMemory:
         return data_batches, ep_returns, stacked_model_inputs
 
     def get_model_inputs(self):
-        return [np.stack([env.obs for env in self.envs], axis=0)]
+        return np.stack([env.obs for env in self.envs],
+                        axis=0), np.stack([env.state for env in self.envs],
+                                          axis=0), np.stack([env.avail_action for env in self.envs], axis=0)
+
+    def close(self):
+        for env in self.envs:
+            env.close()

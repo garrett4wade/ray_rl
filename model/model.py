@@ -1,9 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from torch.distributions import Categorical
-from module.conv import ConvMaxpoolResModule
 
 
 class ActorCritic(nn.Module):
@@ -15,66 +13,50 @@ class ActorCritic(nn.Module):
         else:
             self.device = torch.device(kwargs['gpu_id'] if torch.cuda.is_available() else 'cpu')
 
+        self.obs_dim = obs_dim = kwargs['obs_dim']
+        self.state_dim = state_dim = kwargs['state_dim']
         self.action_dim = action_dim = kwargs['action_dim']
         self.hidden_dim = hidden_dim = kwargs['hidden_dim']
 
-        # default convolutional model in rllib
-        self.feature_net = nn.Sequential(nn.Conv2d(4, 8, kernel_size=3, stride=1, padding=0),
-                                         nn.MaxPool2d(kernel_size=2, stride=2, padding=0), nn.ReLU(),
-                                         ConvMaxpoolResModule(8), ConvMaxpoolResModule(16), ConvMaxpoolResModule(32),
-                                         nn.ReLU(), nn.Flatten())
-
-        # actor
-        self.action_layer = nn.Linear(hidden_dim, action_dim)
-        # critic
-        self.value_layer = nn.Linear(hidden_dim, 1)
+        self.actor = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim),
+                                   nn.ReLU(), nn.Linear(hidden_dim, action_dim))
+        self.critic = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim),
+                                    nn.ReLU(), nn.Linear(hidden_dim, 1))
 
         self.clip_ratio = kwargs['clip_ratio']
         self.tpdv = dict(device=self.device, dtype=torch.float32)
         self.to(self.device)
 
-    def core(self, obs):
-        if obs.ndim == 4:
-            return self.feature_net(obs)
-        else:
-            b, t, c, h, w = obs.shape
-            return self.feature_net(obs.view(b * t, c, h, w)).reshape(b, t, -1)
-
-    def forward(self, obs):
-        x = self.core(obs)
-        action_logits = self.action_layer(x)
-        value = self.value_layer(x).squeeze(-1)
-
-        action = Categorical(logits=action_logits).sample()
-        return action, action_logits, value
+    def forward(self, obs, state):
+        return self.actor(obs), self.critic(state).squeeze(-1)
 
     @torch.no_grad()
-    def value(self, obs):
-        assert not self.is_training
-        obs = torch.from_numpy(obs).unsqueeze(0)
-        return self.value_layer(self.core(obs)).item()
-
-    @torch.no_grad()
-    def select_action(self, obs):
+    def select_action(self, obs, state, avail_action):
         assert not self.is_training
         obs = torch.from_numpy(obs)
-        results = self(obs)
-        return [result.numpy() for result in results]
+        state = torch.from_numpy(state)
+        avail_action = torch.from_numpy(avail_action)
+        logits, value = self(obs, state)
+        logits[avail_action == 0.0] = -1e10
+        action = Categorical(logits=logits).sample()
+        return action.numpy(), logits.numpy(), value.numpy()
 
-    def compute_loss(self, obs, action, action_logits, adv, value, value_target):
+    def compute_loss(self, obs, state, action, action_logits, avail_action, adv, value, value_target):
         action = action.to(torch.long)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         # to remove padding values
         valid_mask = (value != 0.0).to(torch.float32)
 
-        _, target_action_logits, cur_state_value = self(obs)
+        target_action_logits, cur_state_value = self(obs, state)
+        target_action_logits[avail_action == 0.0] = -1e10
 
         target_dist = Categorical(logits=target_action_logits)
         target_action_logprobs = target_dist.log_prob(action)
         behavior_action_logprobs = Categorical(logits=action_logits).log_prob(action)
 
         log_rhos = target_action_logprobs - behavior_action_logprobs.detach()
-        rhos = log_rhos.exp()
+        # taking average along agent dim
+        rhos = log_rhos.exp().mean(-1)
 
         p_surr = adv * torch.clamp(rhos, 1 - self.clip_ratio, 1 + self.clip_ratio)
         p_loss = (-torch.min(p_surr, rhos * adv) * valid_mask).mean()
@@ -83,7 +65,7 @@ class ActorCritic(nn.Module):
         v_loss = torch.max(F.mse_loss(cur_state_value, value_target), F.mse_loss(cur_v_clipped, value_target))
         v_loss = (v_loss * valid_mask).mean()
 
-        entropy_loss = (-target_dist.entropy() * valid_mask).mean()
+        entropy_loss = (-target_dist.entropy().mean(-1) * valid_mask).mean()
         return v_loss, p_loss, entropy_loss
 
     def get_weights(self):
