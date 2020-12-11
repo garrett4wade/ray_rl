@@ -201,9 +201,10 @@ if __name__ == "__main__":
         # convert numpy array to tensor and send them to desired device
         for k, v in data_batch.items():
             data_batch[k] = torch.from_numpy(v).to(**learner.tpdv)
+        load_gpu_time = time.time() - start
         # train learner
         loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)
-        optimize_time = time.time() - start
+        optimize_time = time.time() - start - load_gpu_time
 
         # upload updated learner parameter to parameter server
         if global_step % config.push_period == 0:
@@ -223,7 +224,12 @@ if __name__ == "__main__":
         # collect statistics to record
         return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
         loss_stat = {'loss/' + k: v for k, v in loss_stat.items()}
-        time_stat = {'time/sample': sample_time, 'time/optimization': optimize_time, 'time/iteration': dur}
+        time_stat = {
+            'time/sample': sample_time,
+            'time/optimization': optimize_time,
+            'time/iteration': dur,
+            'time/load_gpu': load_gpu_time
+        }
 
         ray_mem_info, main_mem_info = {}, {}
         if config.record_mem:
