@@ -18,7 +18,7 @@ from model.model import ActorCritic
 from ray_utils.ps import ParameterServer, ReturnRecorder
 
 # from queue import Queue
-# from ray_utils.simulation_thread import SimulationThread, BufferCollector
+from ray_utils.simulation_thread import SimulationThread  # , BufferCollector
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
