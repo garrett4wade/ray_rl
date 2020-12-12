@@ -12,7 +12,8 @@ import os
 import psutil
 from pgrep import pgrep
 
-from rl_utils.simple_env import EnvWithMemory, DummyVecEnvWithMemory, GymStarCraft2Env
+from rl_utils.simple_env import EnvWithMemory, VecEnvWithMemory
+from rl_utils.gym_sc2 import GymStarCraft2Env
 from rl_utils.buffer import CircularBuffer
 from model.model import ActorCritic
 from ray_utils.ps import ParameterServer, ReturnRecorder
@@ -28,6 +29,7 @@ parser.add_argument("--wandb_job", type=str, default='run 100M', help='weights &
 parser.add_argument("--no_summary", action='store_true', default=False, help='whether to write summary')
 parser.add_argument("--record_mem", action='store_true', default=False, help='whether to store mem info, which is slow')
 parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
+parser.add_argument('--verbose', action='store_true')
 
 # environment
 parser.add_argument('--env_name', type=str, default='3m', help='name of env')
@@ -88,7 +90,7 @@ def build_worker_env(worker_id, kwargs):
         env_id = worker_id + i * kwargs['num_workers']
         seed = 12345 * env_id + kwargs['seed']
         env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), kwargs))
-    return DummyVecEnvWithMemory(env_fns)
+    return VecEnvWithMemory(env_fns)
 
 
 def build_worker_model(kwargs):

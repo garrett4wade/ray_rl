@@ -13,6 +13,7 @@ class Worker:
     '''
     def __init__(self, worker_id, model_fn, worker_env_fn, ps, kwargs):
         self.id = worker_id
+        self.verbose = kwargs['verbose']
 
         self.env = worker_env_fn(worker_id, kwargs)
         self.model = model_fn(kwargs)
@@ -28,11 +29,12 @@ class Worker:
         weights_job = self.ps.get_weights.remote()
         weights, weights_hash = ray.get(weights_job)
         self.model.load_state_dict(weights)
-        # old_hash = self.weight_hash
+        old_hash = self.weight_hash
         self.weight_hash = weights_hash
-        # print("Worker {} load state dict, "
-        #       "hashing changed from "
-        #       "{} to {}".format(self.id, old_hash, self.weight_hash))
+        if self.verbose:
+            print("Worker {} load state dict, "
+                  "hashing changed from "
+                  "{} to {}".format(self.id, old_hash, self.weight_hash))
         del weights_job, weights, weights_hash
 
     def _data_generator(self):
@@ -72,9 +74,9 @@ class RolloutCollector:
         self.job_hashing = {}
 
         self._data_id_g = self._data_id_generator(num_returns=kwargs['num_returns'])
-        print("###################################################")
-        print("############# Workers starting ...... #############")
-        print("###################################################")
+        print("---------------------------------------------------")
+        print("              Workers starting ......              ")
+        print("---------------------------------------------------")
 
     def _start(self):
         for i in range(self.num_workers):

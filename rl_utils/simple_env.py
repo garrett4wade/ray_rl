@@ -1,20 +1,5 @@
 import numpy as np
 from scipy.signal import lfilter
-from smac.env import StarCraft2Env
-
-
-class GymStarCraft2Env(StarCraft2Env):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-    def reset(self):
-        super().reset()
-        return np.stack(self.get_obs()), self.get_state(), np.stack(self.get_avail_actions())
-
-    def step(self, actions):
-        r, d, info = super().step(actions)
-        return np.stack(self.get_obs()), self.get_state(), np.stack(self.get_avail_actions()), r, d, info
-
 
 ROLLOUT_KEYS = ['obs', 'state', 'action', 'action_logits', 'avail_action', 'value', 'reward']
 COLLECT_KEYS = ['obs', 'state', 'action', 'action_logits', 'avail_action', 'value', 'adv', 'value_target']
@@ -36,11 +21,13 @@ class EnvWithMemory:
         self.gamma = kwargs['gamma']
         self.lmbda = kwargs['lmbda']
         self.max_timesteps = kwargs['max_timesteps']
+
+        self.verbose = kwargs['verbose']
         self.reset()
 
     def reset(self):
-        # if self.done:
-        #     print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
+        if self.done and self.verbose:
+            print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
         self.obs, self.state, self.avail_action = self.preprocess(*self.env.reset())
         self.done = self.won = False
         self.ep_step = self.ep_return = 0
@@ -126,11 +113,10 @@ class EnvWithMemory:
         n_step_v = discounted_r + bootstrap_value * self.gamma**np.arange(episode_length, 0, -1)
         td_err = n_step_v - np.array(self.history['value'], dtype=np.float32)
         adv = lfilter([1], [1, -self.lmbda], td_err[::-1])[::-1]
-        # td_lmbda = lfilter([1], [1, -self.lmbda], n_step_v[::-1])[::-1]
         return n_step_v, adv
 
 
-class DummyVecEnvWithMemory:
+class VecEnvWithMemory:
     def __init__(self, env_fns):
         self.envs = [env_fn() for env_fn in env_fns]
 
