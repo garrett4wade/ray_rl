@@ -40,10 +40,10 @@ class Worker:
         model_inputs = self.env.get_model_inputs()
         while True:
             actions, action_logits, values = self.model.select_action(*model_inputs)
-            data_batches, ep_returns, model_inputs = self.env.step(actions, action_logits, values)
+            data_batches, ep_returns, wons, model_inputs = self.env.step(actions, action_logits, values)
             if len(data_batches) == 0:
                 continue
-            yield (data_batches, ep_returns)
+            yield (data_batches, ep_returns, wons)
             # get new weights only when at least one of vectorized envs is done
             if ray.get(self.pull_job) != self.weight_hash:
                 self.get_new_weights()
@@ -137,8 +137,10 @@ class SimulationThread(Thread):
             self.wait_times.append(wait_time)
             all_batch_return = ray.get(ready_sample_ids)
 
-            nested_data_batches, nested_ep_returns = zip(*deepcopy(all_batch_return))
-            push_job = self.recorder.push.remote(list(itertools.chain.from_iterable(nested_ep_returns)))
+            nested_data_batches, nested_ep_returns, nested_wons = zip(*deepcopy(all_batch_return))
+            ep_returns = list(itertools.chain.from_iterable(nested_ep_returns))
+            wons = list(itertools.chain.from_iterable(nested_wons))
+            push_job = self.recorder.push.remote(ep_returns, wons)
             self.global_buffer.put_batch(list(itertools.chain.from_iterable(nested_data_batches)))
 
             ray.get(push_job)

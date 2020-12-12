@@ -28,6 +28,7 @@ class EnvWithMemory:
 
         self.history_data_batches = []
         self.history_ep_returns = []
+        self.history_wons = []
 
         self.chunk_len = kwargs['chunk_len']
         self.min_return_chunk_num = kwargs['min_return_chunk_num']
@@ -35,15 +36,13 @@ class EnvWithMemory:
         self.gamma = kwargs['gamma']
         self.lmbda = kwargs['lmbda']
         self.max_timesteps = kwargs['max_timesteps']
-        self.done = False
-        self.ep_step = self.ep_return = 0
         self.reset()
 
     def reset(self):
         # if self.done:
         #     print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
         self.obs, self.state, self.avail_action = self.preprocess(*self.env.reset())
-        self.done = False
+        self.done = self.won = False
         self.ep_step = self.ep_return = 0
         self.reset_history()
 
@@ -58,17 +57,21 @@ class EnvWithMemory:
             # to compute gae and collect history data
             self.history_data_batches += self.collect(value)
             self.history_ep_returns.append(self.ep_return)
+            self.history_wons.append(self.won)
             self.reset()
             if len(self.history_data_batches) >= self.min_return_chunk_num:
                 data_batches = self.history_data_batches
                 ep_returns = self.history_ep_returns
+                wons = self.history_wons
                 self.history_data_batches = []
                 self.history_ep_returns = []
-                return data_batches, ep_returns, (self.obs, self.state, self.avail_action)
+                self.history_wons = []
+                return data_batches, ep_returns, wons, (self.obs, self.state, self.avail_action)
             else:
-                return [], [], (self.obs, self.state, self.avail_action)
+                return [], [], [], (self.obs, self.state, self.avail_action)
 
-        n_obs, n_state, n_avail_action, r, d, _ = self.env.step(action)
+        n_obs, n_state, n_avail_action, r, d, info = self.env.step(action)
+        self.won = info['battle_won']
         n_obs, n_state, n_avail_action = self.preprocess(n_obs, n_state, n_avail_action)
 
         self.ep_return += r
@@ -86,7 +89,7 @@ class EnvWithMemory:
         self.state = n_state
         self.avail_action = n_avail_action
         self.done = d or self.ep_step >= self.max_timesteps
-        return [], [], (self.obs, self.state, self.avail_action)
+        return [], [], [], (self.obs, self.state, self.avail_action)
 
     def collect(self, bootstrap_value):
         v_target, adv = self.compute_gae(bootstrap_value)
@@ -132,18 +135,17 @@ class DummyVecEnvWithMemory:
         self.envs = [env_fn() for env_fn in env_fns]
 
     def step(self, actions, action_logits, values):
-        data_batches, ep_returns, model_inputs = [], [], []
+        data_batches, ep_returns, wons, model_inputs = [], [], [], []
         for i, env in enumerate(self.envs):
-            cur_data_batches, cur_ep_returns, model_input = env.step(actions[i], action_logits[i], values[i])
-            if len(cur_data_batches) > 0:
-                data_batches += cur_data_batches
-            if len(cur_ep_returns) > 0:
-                ep_returns += cur_ep_returns
+            cur_data_batches, cur_ep_returns, cur_wons, model_input = env.step(actions[i], action_logits[i], values[i])
+            data_batches += cur_data_batches
+            ep_returns += cur_ep_returns
+            wons += cur_wons
             model_inputs.append(model_input)
         stacked_model_inputs = []
         for inp in zip(*model_inputs):
             stacked_model_inputs.append(np.stack(inp))
-        return data_batches, ep_returns, stacked_model_inputs
+        return data_batches, ep_returns, wons, stacked_model_inputs
 
     def get_model_inputs(self):
         return np.stack([env.obs for env in self.envs],

@@ -24,15 +24,19 @@ class ParameterServer:
 class ReturnRecorder:
     def __init__(self):
         self.storage = []
-        self.statistics = dict(max=0, min=0, avg=0)
+        self.statistics = dict(max=0, min=0, avg=0, winning_rate=0)
+        self.wons = []
 
-    def push(self, ep_returns):
+    def push(self, ep_returns, wons):
         self.storage += ep_returns
+        self.wons += wons
 
     def pull(self):
         if len(self.storage) > 0:
             self.statistics['max'] = np.max(self.storage)
             self.statistics['min'] = np.min(self.storage)
             self.statistics['avg'] = np.mean(self.storage)
+            self.statistics['winning_rate'] = np.mean(self.wons)
             self.storage = []
+            self.wons = []
         return self.statistics
