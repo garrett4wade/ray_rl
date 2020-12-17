@@ -119,7 +119,7 @@ class CircularBuffer:
                 segs.append(self._storage[i])
                 self.used_times[i] += 1
         self._next_idx = len(self._storage)
-        return {k: np.stack([seg[k] for seg in segs], axis=0) for k in self.keys}
+        return {k: np.stack([seg[k] for seg in segs], axis=1) for k in self.keys}
 
 
 class CircularBuffer2:

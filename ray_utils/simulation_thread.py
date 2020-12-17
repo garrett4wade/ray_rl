@@ -41,8 +41,8 @@ class Worker:
         self.pull_job = self.ps.pull.remote()
         model_inputs = self.env.get_model_inputs()
         while True:
-            actions, action_logits, values = self.model.select_action(*model_inputs)
-            data_batches, ep_returns, wons, model_inputs = self.env.step(actions, action_logits, values)
+            model_outputs = self.model.select_action(*model_inputs)
+            data_batches, ep_returns, wons, model_inputs = self.env.step(*model_outputs)
             if len(data_batches) == 0:
                 continue
             yield (data_batches, ep_returns, wons)

@@ -8,8 +8,9 @@ class GymStarCraft2Env(StarCraft2Env):
 
     def reset(self):
         super().reset()
-        return np.stack(self.get_obs()), self.get_state(), np.stack(self.get_avail_actions())
+        return np.stack(self.get_obs()), self.get_state(), np.stack(self.get_avail_actions()), self.death_tracker_ally
 
     def step(self, actions):
         r, d, info = super().step(actions)
-        return np.stack(self.get_obs()), self.get_state(), np.stack(self.get_avail_actions()), r, d, info
+        return np.stack(self.get_obs()), self.get_state(), np.stack(
+            self.get_avail_actions()), r, self.death_tracker_ally, d, info

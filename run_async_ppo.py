@@ -1,24 +1,22 @@
+import os
+import psutil
 import ray
 import time
 import wandb
 import argparse
 import numpy as np
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
-import os
-import psutil
 from pgrep import pgrep
+# from queue import Queue
 
+from genetype import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, BURN_IN_INPUT_KEYS
 from rl_utils.simple_env import EnvWithMemory, VecEnvWithMemory
 from rl_utils.gym_sc2 import GymStarCraft2Env
 from rl_utils.buffer import CircularBuffer
-from model.model import ActorCritic
+from model.rec_model import ActorCritic
 from ray_utils.ps import ParameterServer, ReturnRecorder
-
-# from queue import Queue
 from ray_utils.simulation_thread import SimulationThread  # , BufferCollector
 
 # global configuration
@@ -26,8 +24,8 @@ parser = argparse.ArgumentParser(description='run asynchronous PPO')
 parser.add_argument("--exp_name", type=str, default='ray_test0', help='experiment name')
 parser.add_argument("--wandb_group", type=str, default='atari pong', help='weights & biases group name')
 parser.add_argument("--wandb_job", type=str, default='run 100M', help='weights & biases job name')
-parser.add_argument("--no_summary", action='store_true', default=False, help='whether to write summary')
-parser.add_argument("--record_mem", action='store_true', default=False, help='whether to store mem info, which is slow')
+parser.add_argument("--no_summary", action='store_true', help='whether to write summary')
+parser.add_argument("--record_mem", action='store_true', help='whether to store mem info, which is slow')
 parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
 parser.add_argument('--verbose', action='store_true')
 
@@ -39,15 +37,17 @@ parser.add_argument('--total_frames', type=int, default=int(100e6), help='optimi
 # important parameters of model and algorithm
 parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer size of mlp & gru')
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
-parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
+parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
 parser.add_argument('--value_coef', type=float, default=1.0, help='entropy loss coefficient')
 parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lmbda', type=float, default=0.95, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
 parser.add_argument('--reuse_times', type=int, default=2, help='sample reuse times')
-parser.add_argument('--max_grad_norm', type=float, default=0.5, help='maximum gradient norm')
-parser.add_argument('--use_vtrace', type=bool, default=False, help='whether to use vtrace')
+parser.add_argument('--max_grad_norm', type=float, default=10.0, help='maximum gradient norm')
+parser.add_argument('--use_vtrace', action='store_true', help='whether to use vtrace')
+parser.add_argument('--actor_rnn_layers', type=int, default=2, help='whether to use vtrace')
+parser.add_argument('--critic_rnn_layers', type=int, default=1, help='whether to use vtrace')
 
 # recurrent model parameters
 parser.add_argument('--burn_in_len', type=int, default=0, help='rnn hidden state burn-in length')
@@ -74,22 +74,13 @@ def build_simple_env(kwargs, seed=0):
     return GymStarCraft2Env(map_name=kwargs['env_name'], seed=seed)
 
 
-# get state/action information from env
-init_env = build_simple_env(kwargs)
-env_info = init_env.get_env_info()
-kwargs['obs_dim'] = env_info['obs_shape']
-kwargs['state_dim'] = env_info['state_shape']
-kwargs['action_dim'] = env_info['n_actions']
-kwargs['continuous_env'] = False
-del init_env
-
-
 def build_worker_env(worker_id, kwargs):
     env_fns = []
     for i in range(kwargs['env_num']):
         env_id = worker_id + i * kwargs['num_workers']
         seed = 12345 * env_id + kwargs['seed']
-        env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), kwargs))
+        env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), ROLLOUT_KEYS,
+                                             COLLECT_KEYS, BURN_IN_INPUT_KEYS, SHAPES, kwargs))
     return VecEnvWithMemory(env_fns)
 
 
@@ -118,7 +109,19 @@ def train_learner_on_batch(learner, optimizer, data_batch, config):
                 grad_norm=grad_norm.item())
 
 
-if __name__ == "__main__":
+# get state/action information from env
+init_env = build_simple_env(kwargs)
+env_info = init_env.get_env_info()
+kwargs['obs_dim'] = env_info['obs_shape']
+kwargs['state_dim'] = env_info['state_shape']
+kwargs['action_dim'] = env_info['n_actions']
+kwargs['agent_num'] = env_info['n_agents']
+kwargs['continuous_env'] = False
+
+SHAPES = get_shapes(kwargs)
+
+
+def main():
     if kwargs['record_mem']:
         process = psutil.Process(os.getpid())
     exp_start_time = time.time()
@@ -127,9 +130,7 @@ if __name__ == "__main__":
     torch.manual_seed(kwargs['seed'])
     np.random.seed(kwargs['seed'] + 13563)
 
-    if args.no_summary:
-        config = args
-    else:
+    if not args.no_summary:
         # initialized weights&biases summary
         run = wandb.init(project='distributed rl',
                          group=kwargs['wandb_group'],
@@ -138,6 +139,8 @@ if __name__ == "__main__":
                          entity='garrett4wade',
                          config=kwargs)
         config = wandb.config
+    else:
+        config = args
 
     # initialize ray
     # additional 2 cpus are for parameter server & main script respectively
@@ -149,9 +152,8 @@ if __name__ == "__main__":
     init_weights = learner.get_weights()
 
     # initialize buffer
-    keys = ['obs', 'state', 'action', 'action_logits', 'avail_action', 'value', 'adv', 'value_target']
     buffer_maxsize = config.batch_size * config.q_size
-    buffer = CircularBuffer(buffer_maxsize, config.reuse_times, keys)
+    buffer = CircularBuffer(buffer_maxsize, config.reuse_times, COLLECT_KEYS)
 
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
@@ -276,3 +278,7 @@ if __name__ == "__main__":
     simulation_thread.rollout_collector.close_env()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
     ray.shutdown()
+
+
+if __name__ == "__main__":
+    main()
