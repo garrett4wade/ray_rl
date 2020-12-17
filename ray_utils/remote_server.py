@@ -40,3 +40,23 @@ class ReturnRecorder:
             self.storage = []
             self.wons = []
         return self.statistics
+
+
+@ray.remote(num_cpus=1)
+class PopArtServer:
+    def __init__(self, beta):
+        self.beta = beta
+        self.running_mean = 0.0
+        self.running_mean_sq = 0.0
+        self.debiasing_term = 0.0
+
+    def pull(self):
+        debiased_mean = self.running_mean / max(self.debiasing_term, 1e-5)
+        debiased_mean_sq = self.running_mean_sq / max(self.debiasing_term, 1e-5)
+        debiased_std = np.clip(np.sqrt(debiased_mean_sq - debiased_mean**2), 1e-4, 1e6)
+        return debiased_mean, debiased_std
+
+    def push(self, mean, mean_sq):
+        self.running_mean = self.running_mean * self.beta + (1 - self.beta) * mean
+        self.running_mean_sq = self.running_mean_sq * self.beta + (1 - self.beta) * mean_sq
+        self.debiasing_term = self.debiasing_term * self.beta + (1 - self.beta)

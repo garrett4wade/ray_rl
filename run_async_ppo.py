@@ -12,11 +12,11 @@ from pgrep import pgrep
 # from queue import Queue
 
 from genetype import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, BURN_IN_INPUT_KEYS
-from rl_utils.simple_env import EnvWithMemory, VecEnvWithMemory
+from rl_utils.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from rl_utils.gym_sc2 import GymStarCraft2Env
 from rl_utils.buffer import CircularBuffer
 from model.rec_model import ActorCritic
-from ray_utils.ps import ParameterServer, ReturnRecorder
+from ray_utils.remote_server import ParameterServer, ReturnRecorder, PopArtServer
 from ray_utils.simulation_thread import SimulationThread  # , BufferCollector
 
 # global configuration
@@ -39,7 +39,7 @@ parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer si
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
-parser.add_argument('--value_coef', type=float, default=1.0, help='entropy loss coefficient')
+parser.add_argument('--value_coef', type=float, default=0.5, help='entropy loss coefficient')
 parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lmbda', type=float, default=0.95, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
@@ -47,7 +47,8 @@ parser.add_argument('--reuse_times', type=int, default=2, help='sample reuse tim
 parser.add_argument('--max_grad_norm', type=float, default=10.0, help='maximum gradient norm')
 parser.add_argument('--use_vtrace', action='store_true', help='whether to use vtrace')
 parser.add_argument('--actor_rnn_layers', type=int, default=2, help='whether to use vtrace')
-parser.add_argument('--critic_rnn_layers', type=int, default=1, help='whether to use vtrace')
+parser.add_argument('--critic_rnn_layers', type=int, default=2, help='whether to use vtrace')
+parser.add_argument('--popart_beta', type=float, default=0.9997, help='whether to use vtrace')
 
 # recurrent model parameters
 parser.add_argument('--burn_in_len', type=int, default=0, help='rnn hidden state burn-in length')
@@ -74,13 +75,13 @@ def build_simple_env(kwargs, seed=0):
     return GymStarCraft2Env(map_name=kwargs['env_name'], seed=seed)
 
 
-def build_worker_env(worker_id, kwargs):
+def build_worker_env(worker_id, popart_server, kwargs):
     env_fns = []
     for i in range(kwargs['env_num']):
         env_id = worker_id + i * kwargs['num_workers']
         seed = 12345 * env_id + kwargs['seed']
         env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), ROLLOUT_KEYS,
-                                             COLLECT_KEYS, BURN_IN_INPUT_KEYS, SHAPES, kwargs))
+                                             COLLECT_KEYS, BURN_IN_INPUT_KEYS, SHAPES, popart_server, kwargs))
     return VecEnvWithMemory(env_fns)
 
 
@@ -143,8 +144,8 @@ def main():
         config = args
 
     # initialize ray
-    # additional 2 cpus are for parameter server & main script respectively
-    ray.init(num_cpus=config.cpu_per_worker * config.num_workers + 2)
+    # additional 3 cpus are for parameter server + return recorder, popart server & main script respectively
+    ray.init(num_cpus=config.cpu_per_worker * config.num_workers + 3)
 
     # initialize learner, who is responsible for gradient update
     learner = build_learner_model(kwargs)
@@ -158,10 +159,12 @@ def main():
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
     recorder = ReturnRecorder.remote()
+    popart_server = PopArtServer.remote(beta=config.popart_beta)
     simulation_thread = SimulationThread(model_fn=build_worker_model,
                                          worker_env_fn=build_worker_env,
                                          ps=ps,
                                          recorder=recorder,
+                                         popart_server=popart_server,
                                          global_buffer=buffer,
                                          kwargs=kwargs)
     # after starting simulation thread, workers asynchronously interact with
@@ -201,10 +204,12 @@ def main():
             update !
         '''
         start = time.time()
+        popart_pull_job = popart_server.pull.remote()
         # convert numpy array to tensor and send them to desired device
         for k, v in data_batch.items():
             data_batch[k] = torch.from_numpy(v).to(**learner.tpdv)
         load_gpu_time = time.time() - start
+        learner.last_layer_debias(*ray.get(popart_pull_job))
         # train learner
         loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)
         optimize_time = time.time() - start - load_gpu_time
