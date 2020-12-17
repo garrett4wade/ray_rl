@@ -11,11 +11,11 @@ class Worker:
     Model continuously interacts with env to get data,
     and waits RolloutCollector to collect generated data.
     '''
-    def __init__(self, worker_id, model_fn, worker_env_fn, ps, popart_server, kwargs):
+    def __init__(self, worker_id, model_fn, worker_env_fn, ps, kwargs):
         self.id = worker_id
         self.verbose = kwargs['verbose']
 
-        self.env = worker_env_fn(worker_id, popart_server, kwargs)
+        self.env = worker_env_fn(worker_id, kwargs)
         self.model = model_fn(kwargs)
 
         self.ps = ps
@@ -59,7 +59,7 @@ class Worker:
 
 
 class RolloutCollector:
-    def __init__(self, model_fn, worker_env_fn, ps, popart_server, kwargs):
+    def __init__(self, model_fn, worker_env_fn, ps, kwargs):
         self.num_workers = int(kwargs['num_workers'])
         self.ps = ps
         self.workers = [
@@ -67,7 +67,6 @@ class RolloutCollector:
                                                                          model_fn=model_fn,
                                                                          worker_env_fn=worker_env_fn,
                                                                          ps=ps,
-                                                                         popart_server=popart_server,
                                                                          kwargs=kwargs) for i in range(self.num_workers)
         ]
         self.working_jobs = []
@@ -116,12 +115,11 @@ class RolloutCollector:
 
 
 class SimulationThread(Thread):
-    def __init__(self, model_fn, worker_env_fn, ps, recorder, popart_server, global_buffer, kwargs):
+    def __init__(self, model_fn, worker_env_fn, ps, recorder, global_buffer, kwargs):
         super().__init__()
         self.rollout_collector = RolloutCollector(model_fn=model_fn,
                                                   worker_env_fn=worker_env_fn,
                                                   ps=ps,
-                                                  popart_server=popart_server,
                                                   kwargs=kwargs)
         self.global_buffer = global_buffer
         self.recorder = recorder

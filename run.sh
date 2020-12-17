@@ -11,7 +11,7 @@ num_frames=100000000
 seeds=(256780)
 for seed in ${seeds[@]}
 do
-    exp_name="recpopart3m_env"${num_env}"worker"${num_workers}"_seed"${seed}
+    exp_name="recpopart_nolastlayerdebias3m_env"${num_env}"worker"${num_workers}"_seed"${seed}
     echo "current experiment ${exp_name}"
     python run_async_ppo.py --exp_name ${exp_name} \
                             --env_name ${env_name} \

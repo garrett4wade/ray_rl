@@ -1,13 +1,10 @@
-import ray
 import numpy as np
 from scipy.signal import lfilter
 
 
 class EnvWithMemory:
-    def __init__(self, env_fn, rollout_keys, collect_keys, burn_in_input_keys, shapes, popart_server, kwargs):
+    def __init__(self, env_fn, rollout_keys, collect_keys, burn_in_input_keys, shapes, kwargs):
         self.env = env_fn(kwargs)
-        self.popart_server = popart_server
-        self.popart_push_job = []
         self.rollout_keys = rollout_keys
         self.collect_keys = collect_keys
         self.burn_in_input_keys = burn_in_input_keys
@@ -63,7 +60,6 @@ class EnvWithMemory:
         action, action_logits, value = kwargs.get('action'), kwargs.get('action_logits'), kwargs.get('value')
         actor_rnn_hidden, critic_rnn_hidden = kwargs.get('actor_rnn_hidden'), kwargs.get('critic_rnn_hidden')
         if self.done:
-            self.popart_pull_job = self.popart_server.pull.remote()
             # if env is done in the previous step, use bootstrap value
             # to compute gae and collect history data
             self.history_data_batches += self.collect(value)
@@ -143,18 +139,12 @@ class EnvWithMemory:
         return chunks
 
     def compute_gae(self, bootstrap_value):
-        ray.get(self.popart_push_job)
         discounted_r = lfilter([1], [1, -self.gamma], self.history['reward'][::-1])[::-1]
         discount_factor = self.gamma**np.arange(self.ep_step, 0, -1)
-        mu, sigma = ray.get(self.popart_pull_job)
-        denormalized_bv = bootstrap_value * sigma + mu
-        n_step_v = discounted_r + denormalized_bv * discount_factor
-        self.popart_push_job = self.popart_server.push.remote(np.mean(n_step_v), np.mean(n_step_v**2))
-        v_target = (n_step_v - mu) / sigma
-
-        td_err = v_target - (np.array(self.history['value'], dtype=np.float32) * sigma + mu)
+        n_step_v = discounted_r + bootstrap_value * discount_factor
+        td_err = n_step_v - np.array(self.history['value'], dtype=np.float32)
         adv = lfilter([1], [1, -self.lmbda], td_err[::-1])[::-1]
-        return v_target, adv
+        return n_step_v, adv
 
 
 class VecEnvWithMemory:

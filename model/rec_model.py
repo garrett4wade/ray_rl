@@ -32,7 +32,6 @@ class ActorCritic(nn.Module):
         self.critic_rnn = nn.GRU(hidden_dim, hidden_dim, num_layers=critic_rnn_layers)
         self.critic_head = nn.Linear(hidden_dim, 1)
 
-        self.popart_mu = self.popart_sigma = None
         self.clip_ratio = kwargs['clip_ratio']
         self.chunk_len = kwargs['chunk_len']
         self.burn_in_len = kwargs['burn_in_len']
@@ -139,11 +138,3 @@ class ActorCritic(nn.Module):
 
     def get_weights(self):
         return {k: v.cpu() for k, v in self.state_dict().items()}
-
-    @torch.no_grad()
-    def last_layer_debias(self, mu_, sigma_):
-        if self.popart_mu is not None:
-            self.critic_head.weight.data.mul_(self.popart_sigma / sigma_)
-            self.critic_head.bias.data.mul_(self.popart_sigma / sigma_).add_((self.popart_mu - mu_) / sigma_)
-        self.popart_mu = mu_
-        self.popart_sigma = sigma_

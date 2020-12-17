@@ -16,7 +16,7 @@ from rl_utils.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from rl_utils.gym_sc2 import GymStarCraft2Env
 from rl_utils.buffer import CircularBuffer
 from model.rec_model import ActorCritic
-from ray_utils.remote_server import ParameterServer, ReturnRecorder, PopArtServer
+from ray_utils.remote_server import ParameterServer, ReturnRecorder
 from ray_utils.simulation_thread import SimulationThread  # , BufferCollector
 
 # global configuration
@@ -48,7 +48,6 @@ parser.add_argument('--max_grad_norm', type=float, default=10.0, help='maximum g
 parser.add_argument('--use_vtrace', action='store_true', help='whether to use vtrace')
 parser.add_argument('--actor_rnn_layers', type=int, default=2, help='whether to use vtrace')
 parser.add_argument('--critic_rnn_layers', type=int, default=2, help='whether to use vtrace')
-parser.add_argument('--popart_beta', type=float, default=0.9997, help='whether to use vtrace')
 
 # recurrent model parameters
 parser.add_argument('--burn_in_len', type=int, default=0, help='rnn hidden state burn-in length')
@@ -75,13 +74,13 @@ def build_simple_env(kwargs, seed=0):
     return GymStarCraft2Env(map_name=kwargs['env_name'], seed=seed)
 
 
-def build_worker_env(worker_id, popart_server, kwargs):
+def build_worker_env(worker_id, kwargs):
     env_fns = []
     for i in range(kwargs['env_num']):
         env_id = worker_id + i * kwargs['num_workers']
         seed = 12345 * env_id + kwargs['seed']
         env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), ROLLOUT_KEYS,
-                                             COLLECT_KEYS, BURN_IN_INPUT_KEYS, SHAPES, popart_server, kwargs))
+                                             COLLECT_KEYS, BURN_IN_INPUT_KEYS, SHAPES, kwargs))
     return VecEnvWithMemory(env_fns)
 
 
@@ -144,8 +143,8 @@ def main():
         config = args
 
     # initialize ray
-    # additional 3 cpus are for parameter server + return recorder, popart server & main script respectively
-    ray.init(num_cpus=config.cpu_per_worker * config.num_workers + 3)
+    # additional 3 cpus are for parameter server + return recorder & main script respectively
+    ray.init(num_cpus=config.cpu_per_worker * config.num_workers + 2)
 
     # initialize learner, who is responsible for gradient update
     learner = build_learner_model(kwargs)
@@ -159,12 +158,10 @@ def main():
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
     recorder = ReturnRecorder.remote()
-    popart_server = PopArtServer.remote(beta=config.popart_beta)
     simulation_thread = SimulationThread(model_fn=build_worker_model,
                                          worker_env_fn=build_worker_env,
                                          ps=ps,
                                          recorder=recorder,
-                                         popart_server=popart_server,
                                          global_buffer=buffer,
                                          kwargs=kwargs)
     # after starting simulation thread, workers asynchronously interact with
@@ -204,13 +201,10 @@ def main():
             update !
         '''
         start = time.time()
-        popart_pull_job = popart_server.pull.remote()
         # convert numpy array to tensor and send them to desired device
         for k, v in data_batch.items():
             data_batch[k] = torch.from_numpy(v).to(**learner.tpdv)
         load_gpu_time = time.time() - start
-        popart_mean, popart_std = ray.get(popart_pull_job)
-        learner.last_layer_debias(popart_mean, popart_std)
         # train learner
         loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)
         optimize_time = time.time() - start - load_gpu_time
@@ -239,7 +233,7 @@ def main():
             'time/iteration': dur,
             'time/load_gpu': load_gpu_time
         }
-        other_stat = {'popart/mean': popart_mean, 'popart/std': popart_std}
+        other_stat = {}
 
         ray_mem_info, main_mem_info = {}, {}
         if config.record_mem:
