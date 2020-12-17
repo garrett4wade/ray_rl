@@ -1,7 +1,7 @@
 pkill -9 ray
 pkill -9 Main_Thread
 
-batch_size=1024
+batch_size=256
 num_workers=40
 num_env=2
 group_name="sc2"
@@ -11,7 +11,7 @@ num_frames=100000000
 seeds=(256780)
 for seed in ${seeds[@]}
 do
-    exp_name="rec3m_env"${num_env}"worker"${num_workers}"_seed"${seed}
+    exp_name="recpopart3m_env"${num_env}"worker"${num_workers}"_seed"${seed}
     echo "current experiment ${exp_name}"
     python run_async_ppo.py --exp_name ${exp_name} \
                             --env_name ${env_name} \

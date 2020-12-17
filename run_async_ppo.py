@@ -38,7 +38,7 @@ parser.add_argument('--total_frames', type=int, default=int(100e6), help='optimi
 parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer size of mlp & gru')
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
-parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
+parser.add_argument('--entropy_coef', type=float, default=.05, help='entropy loss coefficient')
 parser.add_argument('--value_coef', type=float, default=0.5, help='entropy loss coefficient')
 parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lmbda', type=float, default=0.95, help='gae discount factor')
@@ -209,7 +209,8 @@ def main():
         for k, v in data_batch.items():
             data_batch[k] = torch.from_numpy(v).to(**learner.tpdv)
         load_gpu_time = time.time() - start
-        learner.last_layer_debias(*ray.get(popart_pull_job))
+        popart_mean, popart_std = ray.get(popart_pull_job)
+        learner.last_layer_debias(popart_mean, popart_std)
         # train learner
         loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)
         optimize_time = time.time() - start - load_gpu_time
@@ -238,6 +239,7 @@ def main():
             'time/iteration': dur,
             'time/load_gpu': load_gpu_time
         }
+        other_stat = {'popart/mean': popart_mean, 'popart/std': popart_std}
 
         ray_mem_info, main_mem_info = {}, {}
         if config.record_mem:
@@ -275,7 +277,7 @@ def main():
 
         if not args.no_summary:
             # write summary into weights&biases
-            wandb.log({**return_stat, **loss_stat, **time_stat, **memory_stat}, step=num_frames)
+            wandb.log({**return_stat, **loss_stat, **time_stat, **memory_stat, **other_stat}, step=num_frames)
 
         del return_stat_job, return_record
     if not args.no_summary:

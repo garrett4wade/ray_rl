@@ -152,7 +152,7 @@ class EnvWithMemory:
         self.popart_push_job = self.popart_server.push.remote(np.mean(n_step_v), np.mean(n_step_v**2))
         v_target = (n_step_v - mu) / sigma
 
-        td_err = v_target - np.array(self.history['value'], dtype=np.float32)
+        td_err = v_target - (np.array(self.history['value'], dtype=np.float32) * sigma + mu)
         adv = lfilter([1], [1, -self.lmbda], td_err[::-1])[::-1]
         return v_target, adv
 
