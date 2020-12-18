@@ -22,15 +22,15 @@ class ActorCritic(nn.Module):
         self.critic_rnn_layers = critic_rnn_layers = kwargs['critic_rnn_layers']
 
         # actor model
-        self.actor_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.LayerNorm([hidden_dim]), nn.ReLU(),
-                                       nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm([hidden_dim]), nn.ReLU())
+        self.actor_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.ReLU(), nn.LayerNorm([hidden_dim]),
+                                       nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.LayerNorm([hidden_dim]))
         self.actor_rnn = nn.GRU(hidden_dim, hidden_dim, num_layers=actor_rnn_layers)
         self.actor_gate = nn.Linear(hidden_dim, hidden_dim)
         self.actor_head = nn.Linear(hidden_dim, action_dim)
 
         # critic model
-        self.critic_net = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.LayerNorm([hidden_dim]), nn.ReLU(),
-                                        nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm([hidden_dim]), nn.ReLU())
+        self.critic_net = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.ReLU(), nn.LayerNorm([hidden_dim]),
+                                        nn.Linear(hidden_dim, hidden_dim), nn.ReLU(), nn.LayerNorm([hidden_dim]))
         self.critic_rnn = nn.GRU(hidden_dim, hidden_dim, num_layers=critic_rnn_layers)
         self.critic_gate = nn.Linear(hidden_dim, hidden_dim)
         self.critic_head = nn.Linear(hidden_dim, 1)
