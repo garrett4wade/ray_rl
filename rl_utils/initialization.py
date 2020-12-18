@@ -6,7 +6,7 @@ def init(m):
         for c in m.children():
             init(c)
     elif isinstance(m, nn.Linear):
-        nn.init.kaiming_uniform(m.weight)
+        nn.init.kaiming_uniform_(m.weight)
         if m.bias is not None:
             nn.init.zeros_(m.bias)
     elif isinstance(m, nn.GRU):
