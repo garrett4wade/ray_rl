@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
+from rl_utils.initialization import init
 
 
 class ActorCritic(nn.Module):
@@ -21,21 +22,25 @@ class ActorCritic(nn.Module):
         self.critic_rnn_layers = critic_rnn_layers = kwargs['critic_rnn_layers']
 
         # actor model
-        self.actor_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim),
-                                       nn.ReLU())
+        self.actor_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.LayerNorm([hidden_dim]), nn.ReLU(),
+                                       nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm([hidden_dim]), nn.ReLU())
         self.actor_rnn = nn.GRU(hidden_dim, hidden_dim, num_layers=actor_rnn_layers)
+        self.actor_gate = nn.Linear(hidden_dim, hidden_dim)
         self.actor_head = nn.Linear(hidden_dim, action_dim)
 
         # critic model
-        self.critic_net = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim),
-                                        nn.ReLU())
+        self.critic_net = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.LayerNorm([hidden_dim]), nn.ReLU(),
+                                        nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm([hidden_dim]), nn.ReLU())
         self.critic_rnn = nn.GRU(hidden_dim, hidden_dim, num_layers=critic_rnn_layers)
+        self.critic_gate = nn.Linear(hidden_dim, hidden_dim)
         self.critic_head = nn.Linear(hidden_dim, 1)
 
         self.clip_ratio = kwargs['clip_ratio']
         self.chunk_len = kwargs['chunk_len']
         self.burn_in_len = kwargs['burn_in_len']
         self.tpdv = dict(device=self.device, dtype=torch.float32)
+        for c in self.children():
+            init(c)
         self.to(self.device)
 
     def core(self, obs, state, actor_rnn_hidden, critic_rnn_hidden):
@@ -56,12 +61,19 @@ class ActorCritic(nn.Module):
             chout: critic GRU output hidden state
         """
         chunk_len, bs, agn = obs.shape[:3]
-        actor_feature, ahout = self.actor_rnn(
-            self.actor_net(obs.view(chunk_len, bs * agn, self.obs_dim)),
+        actor_mlp_out = self.actor_net(obs)
+        actor_rnn_out, ahout = self.actor_rnn(
+            actor_mlp_out.view(chunk_len, bs * agn, self.hidden_dim),
             actor_rnn_hidden.reshape(self.actor_rnn_layers, bs * agn, self.hidden_dim))
-        critic_feature, chout = self.critic_rnn(self.critic_net(state), critic_rnn_hidden)
+        actor_rnn_out = actor_rnn_out.view(chunk_len, bs, agn, self.hidden_dim)
         ahout = ahout.view(self.actor_rnn_layers, bs, agn, self.hidden_dim)
-        return actor_feature.view(chunk_len, bs, agn, self.hidden_dim), critic_feature, ahout, chout
+        actor_feature = actor_mlp_out + torch.sigmoid(self.actor_gate(actor_mlp_out)) * actor_rnn_out
+
+        critic_mlp_out = self.critic_net(state)
+        critic_rnn_out, chout = self.critic_rnn(critic_mlp_out, critic_rnn_hidden)
+        critic_feature = critic_mlp_out + torch.sigmoid(self.critic_gate(critic_mlp_out)) * critic_rnn_out
+
+        return actor_feature, critic_feature, ahout, chout
 
     def forward(self, obs, state, actor_rnn_hidden, critic_rnn_hidden):
         actor_feature, critic_feature, ahout, chout = self.core(obs, state, actor_rnn_hidden, critic_rnn_hidden)
