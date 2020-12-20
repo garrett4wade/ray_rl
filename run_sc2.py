@@ -13,11 +13,11 @@ import os
 import psutil
 from pgrep import pgrep
 
-from genetype import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, BURN_IN_INPUT_KEYS
-from rl_utils.env_with_memory import EnvWithMemory, VecEnvWithMemory
-from rl_utils.gym_sc2 import GymStarCraft2Env
+from env.starcraft2.genetype import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, BURN_IN_INPUT_KEYS
+from env.starcraft2.env_with_memory import EnvWithMemory, VecEnvWithMemory
+from env.starcraft2.gym_sc2 import GymStarCraft2Env
+from env.starcraft2.model.rec_model import ActorCritic
 from rl_utils.buffer import CircularBuffer
-from model.rec_model import ActorCritic
 from ray_utils.remote_server import ParameterServer, EpisodeRecorder
 from ray_utils.remote_actors import SimulationSupervisor, BufferCollector  # , GPULoader
 
@@ -37,7 +37,7 @@ parser.add_argument('--env_num', type=int, default=2, help='# evironments per wo
 parser.add_argument('--total_frames', type=int, default=int(100e6), help='optimization batch size')
 
 # important parameters of model and algorithm
-parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer size of mlp & gru')
+parser.add_argument('--hidden_dim', type=int, default=512, help='hidden layer size of mlp & gru')
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
 parser.add_argument('--lr', type=float, default=5e-4, help='learning rate')
 parser.add_argument('--entropy_coef', type=float, default=.01, help='entropy loss coefficient')
@@ -46,7 +46,7 @@ parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lmbda', type=float, default=0.95, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
 parser.add_argument('--reuse_times', type=int, default=2, help='sample reuse times')
-parser.add_argument('--max_grad_norm', type=float, default=1.0, help='maximum gradient norm')
+parser.add_argument('--max_grad_norm', type=float, default=40.0, help='maximum gradient norm')
 parser.add_argument('--use_vtrace', action='store_true', help='whether to use vtrace')
 parser.add_argument('--actor_rnn_layers', type=int, default=2, help='whether to use vtrace')
 parser.add_argument('--critic_rnn_layers', type=int, default=2, help='whether to use vtrace')
@@ -56,7 +56,7 @@ parser.add_argument('--burn_in_len', type=int, default=0, help='rnn hidden state
 parser.add_argument('--chunk_len', type=int, default=16, help='rnn BPTT chunk length')
 parser.add_argument('--replay', type=int, default=1, help='sequence cross-replay times')
 parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode maximum timesteps')
-parser.add_argument('--min_return_chunk_num', type=int, default=64, help='minimal chunk number before env.collect')
+parser.add_argument('--min_return_chunk_num', type=int, default=32, help='minimal chunk number before env.collect')
 
 # Ray distributed training parameters
 parser.add_argument('--num_supervisors', type=int, default=1, help='# of simulation supervisors')

@@ -55,9 +55,7 @@ class EnvWithMemory:
     def _get_model_input(self):
         return self.obs, self.state, self.avail_action, self.actor_rnn_hidden, self.critic_rnn_hidden
 
-    def step(self, **kwargs):
-        action, action_logits, value = kwargs.get('action'), kwargs.get('action_logits'), kwargs.get('value')
-        actor_rnn_hidden, critic_rnn_hidden = kwargs.get('actor_rnn_hidden'), kwargs.get('critic_rnn_hidden')
+    def step(self, action, action_logits, value, actor_rnn_hidden, critic_rnn_hidden):
         if self.done:
             # if env is done in the previous step, use bootstrap value
             # to compute gae and collect history data
@@ -147,17 +145,10 @@ class VecEnvWithMemory:
     def __init__(self, env_fns):
         self.envs = [env_fn() for env_fn in env_fns]
 
-    def step(self, actions, action_logits, values, actor_rnn_hiddens, critic_rnn_hiddens):
+    def step(self, *args):
         data_batches, infos, model_inputs = [], [], []
         for i, env in enumerate(self.envs):
-            cur_data_batches, cur_infos, model_input = env.step(
-                **{
-                    'action': actions[i],
-                    'action_logits': action_logits[i],
-                    'value': values[i],
-                    'actor_rnn_hidden': actor_rnn_hiddens[i],
-                    'critic_rnn_hidden': critic_rnn_hiddens[i],
-                })
+            cur_data_batches, cur_infos, model_input = env.step(*[arg[i] for arg in args])
             data_batches += cur_data_batches
             infos += cur_infos
             model_inputs.append(model_input)
