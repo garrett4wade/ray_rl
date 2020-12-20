@@ -21,24 +21,28 @@ class ParameterServer:
 
 
 @ray.remote(num_cpus=0.5)
-class ReturnRecorder:
+class EpisodeRecorder:
     def __init__(self):
-        self.storage = []
-        self.statistics = dict(max=0, min=0, avg=0, winning_rate=0)
-        self.wons = []
+        self.storage = dict()
+        self.statistics = dict()
 
-    def push(self, ep_returns, wons):
-        self.storage += ep_returns
-        self.wons += wons
+    def push(self, stat_list):
+        if len(stat_list) == 0:
+            return
+        stat_dict = {k: [x[k] for x in stat_list] for k in stat_list[0].keys()}
+        for k, v in stat_dict.items():
+            if k not in self.storage.keys():
+                self.storage[k] = v
+            else:
+                self.storage[k] += v
 
     def pull(self):
         if len(self.storage) > 0:
-            self.statistics['max'] = np.max(self.storage)
-            self.statistics['min'] = np.min(self.storage)
-            self.statistics['avg'] = np.mean(self.storage)
-            self.statistics['winning_rate'] = np.mean(self.wons)
-            self.storage = []
-            self.wons = []
+            for k, v in self.storage.items():
+                self.statistics[k + '/max'] = np.max(v)
+                self.statistics[k + '/min'] = np.min(v)
+                self.statistics[k + '/avg'] = np.mean(v)
+            self.storage = dict()
         return self.statistics
 
 

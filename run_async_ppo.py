@@ -1,28 +1,30 @@
-import os
-import psutil
 import ray
 import time
 import wandb
+import nvgpu
 import argparse
 import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+import os
+import psutil
 from pgrep import pgrep
-# from queue import Queue
 
 from genetype import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, BURN_IN_INPUT_KEYS
 from rl_utils.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from rl_utils.gym_sc2 import GymStarCraft2Env
 from rl_utils.buffer import CircularBuffer
 from model.rec_model import ActorCritic
-from ray_utils.remote_server import ParameterServer, ReturnRecorder
-from ray_utils.simulation_thread import SimulationThread  # , BufferCollector
+from ray_utils.remote_server import ParameterServer, EpisodeRecorder
+from ray_utils.remote_actors import SimulationSupervisor, BufferCollector  # , GPULoader
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
 parser.add_argument("--exp_name", type=str, default='ray_test0', help='experiment name')
-parser.add_argument("--wandb_group", type=str, default='atari pong', help='weights & biases group name')
+parser.add_argument("--wandb_group", type=str, default='sc2', help='weights & biases group name')
 parser.add_argument("--wandb_job", type=str, default='run 100M', help='weights & biases job name')
 parser.add_argument("--no_summary", action='store_true', help='whether to write summary')
 parser.add_argument("--record_mem", action='store_true', help='whether to store mem info, which is slow')
@@ -57,6 +59,9 @@ parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode
 parser.add_argument('--min_return_chunk_num', type=int, default=64, help='minimal chunk number before env.collect')
 
 # Ray distributed training parameters
+parser.add_argument('--num_supervisors', type=int, default=1, help='# of simulation supervisors')
+parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
+parser.add_argument('--num_readers', type=int, default=4, help='# of data sendors')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=1, help='number of returns in ray.wait')
@@ -120,8 +125,7 @@ kwargs['continuous_env'] = False
 
 SHAPES = get_shapes(kwargs)
 
-
-def main():
+if __name__ == "__main__":
     if kwargs['record_mem']:
         process = psutil.Process(os.getpid())
     exp_start_time = time.time()
@@ -130,7 +134,9 @@ def main():
     torch.manual_seed(kwargs['seed'])
     np.random.seed(kwargs['seed'] + 13563)
 
-    if not args.no_summary:
+    if args.no_summary:
+        config = args
+    else:
         # initialized weights&biases summary
         run = wandb.init(project='distributed rl',
                          group=kwargs['wandb_group'],
@@ -139,12 +145,18 @@ def main():
                          entity='garrett4wade',
                          config=kwargs)
         config = wandb.config
-    else:
-        config = args
 
     # initialize ray
-    # additional 3 cpus are for parameter server + return recorder & main script respectively
-    ray.init(num_cpus=config.cpu_per_worker * config.num_workers + 2)
+    # additional 2 cpus are for parameter server & main script respectively
+    worker_cpus = config.cpu_per_worker * config.num_workers
+    supervisor_cpus = config.num_supervisors * (1 + 1 + config.num_readers)
+    collector_cpus = config.num_collectors
+    ps_rtrecorder_cpus = 1
+    buffer_cpus = 2
+    main_process_cpus = 1
+    ray.init(num_cpus=worker_cpus + supervisor_cpus + collector_cpus + ps_rtrecorder_cpus + buffer_cpus +
+             main_process_cpus,
+             num_gpus=len(nvgpu.available_gpus()))
 
     # initialize learner, who is responsible for gradient update
     learner = build_learner_model(kwargs)
@@ -153,24 +165,25 @@ def main():
 
     # initialize buffer
     buffer_maxsize = config.batch_size * config.q_size
-    buffer = CircularBuffer(buffer_maxsize, config.reuse_times, COLLECT_KEYS)
+    buffer = ray.remote(num_cpus=2)(CircularBuffer).remote(buffer_maxsize, config.reuse_times, COLLECT_KEYS)
 
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
-    recorder = ReturnRecorder.remote()
-    simulation_thread = SimulationThread(model_fn=build_worker_model,
-                                         worker_env_fn=build_worker_env,
-                                         ps=ps,
-                                         recorder=recorder,
-                                         global_buffer=buffer,
-                                         kwargs=kwargs)
+    recorder = EpisodeRecorder.remote()
+    supervisors = [
+        SimulationSupervisor.remote(model_fn=build_worker_model,
+                                    worker_env_fn=build_worker_env,
+                                    ps=ps,
+                                    recorder=recorder,
+                                    remote_buffer=buffer,
+                                    kwargs=kwargs) for _ in range(config.num_supervisors)
+    ]
     # after starting simulation thread, workers asynchronously interact with
     # environments and send data into buffer via Ray backbone
-    simulation_thread.start()
+    for supervisor in supervisors:
+        supervisor.start.remote()
 
-    # batch_queue = Queue(maxsize=config.q_size)
-    # buffer_collector = BufferCollector(batch_queue, buffer, config.batch_size)
-    # buffer_collector.start()
+    buffer_collector = BufferCollector(buffer, config.batch_size, config.num_collectors)
 
     ray_proc_name = ['ray::Worker']  # , 'raylet', 'ray::Param', 'ray::Ret']
     ray_proc = None
@@ -184,10 +197,7 @@ def main():
         '''
         iter_start = time.time()
         # wait until there's enough data in buffer
-        data_batch = buffer.get(config.batch_size)
-        while data_batch is None:
-            data_batch = buffer.get(config.batch_size)
-        # data_batch = batch_queue.get()
+        data_batch = ray.get(buffer_collector.get_batch_ref())
         sample_time = time.time() - iter_start
 
         if ray_proc is None and config.record_mem:
@@ -215,17 +225,17 @@ def main():
             ray.get(push_job)
             del push_job
 
-        return_record = ray.get(return_stat_job)
+        return_stat = ray.get(return_stat_job)
 
         dur = time.time() - iter_start
         print("----------------------------------------------")
         print(("Global Step: {}, Frames: {}, " + "Average Return: {:.2f}, " + "Sample Time: {:.2f}s, " +
                "Optimization Time: {:.2f}s, " + "Iteration Step Time: {:.2f}s").format(
-                   global_step, num_frames, return_record['avg'], sample_time, optimize_time, dur))
+                   global_step, num_frames, return_stat['ep_return/avg'], sample_time,
+                   optimize_time, dur))
         print("----------------------------------------------")
 
         # collect statistics to record
-        return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
         loss_stat = {'loss/' + k: v for k, v in loss_stat.items()}
         time_stat = {
             'time/sample': sample_time,
@@ -233,7 +243,6 @@ def main():
             'time/iteration': dur,
             'time/load_gpu': load_gpu_time
         }
-        other_stat = {}
 
         ray_mem_info, main_mem_info = {}, {}
         if config.record_mem:
@@ -258,28 +267,26 @@ def main():
                 'memory/cpu_util': process.cpu_percent() / 100,
             }
         memory_stat = {
-            'buffer/utilization': buffer.size() / buffer._maxsize,
-            # 'buffer/batch_queue_utilization': batch_queue.qsize() / batch_queue.maxsize
-            'buffer/received_sample': buffer.received_sample,
-            'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
+            'buffer/utilization':
+            ray.get(buffer.get_util.remote()),
+            'buffer/received_sample':
+            ray.get(buffer.get_received_sample.remote()),
+            'buffer/consumed_sample':
+            num_frames / kwargs['chunk_len'],
             'buffer/ready_id_queue_util':
-            simulation_thread.ready_id_queue.qsize() / simulation_thread.ready_id_queue.maxsize,
-            'buffer/ray_wait_time': simulation_thread.get_wait_time(),
+            np.mean(ray.get([supervisor.get_ready_queue_util.remote() for supervisor in supervisors])),
+            # 'buffer/ray_wait_time':
+            # np.mean(ray.get([supervisor.get_wait_time.remote() for supervisor in supervisors])),
             **ray_mem_info,
             **main_mem_info,
         }
 
         if not args.no_summary:
             # write summary into weights&biases
-            wandb.log({**return_stat, **loss_stat, **time_stat, **memory_stat, **other_stat}, step=num_frames)
+            wandb.log({**return_stat, **loss_stat, **time_stat, **memory_stat}, step=num_frames)
 
-        del return_stat_job, return_record
+        del return_stat_job, return_stat
     if not args.no_summary:
         run.finish()
-    simulation_thread.rollout_collector.close_env()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
     ray.shutdown()
-
-
-if __name__ == "__main__":
-    main()

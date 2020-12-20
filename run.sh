@@ -5,9 +5,9 @@ batch_size=256
 num_workers=50
 num_env=2
 group_name="sc2"
-env_names=("8m" "25m" "MMM2")
+env_names=("3m")
 num_frames=200000000
-seeds=(256780 892356789)
+seeds=(256780)
 for env_name in ${env_names[@]}
 do
     job_name=env_name
@@ -25,7 +25,8 @@ do
                                 --env_num ${num_env} \
                                 --num_workers ${num_workers} \
                                 --gpu_id 0 \
-                                --min_return_chunk_num 32
+                                --min_return_chunk_num 32 \
+                                --no_summary
         pkill -9 ray
         pkill -9 Main_Thread
         # wait for port release

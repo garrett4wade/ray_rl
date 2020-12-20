@@ -2,71 +2,6 @@ import numpy as np
 import random
 
 
-class FIFOQueue():
-    def __init__(self, size, keys):
-        self._storage = []
-        self._maxsize = int(size)
-        self._next_idx = 0
-        self.keys = keys
-
-    def size(self):
-        return len(self._storage)
-
-    def __len__(self):
-        return len(self._storage)
-
-    def put(self, seg):
-        if self._next_idx >= len(self._storage):
-            self._storage.append(seg)
-        else:
-            self._storage[self._next_idx] = seg
-        self._next_idx = (self._next_idx + 1) % self._maxsize
-
-    def get(self, batch_size):
-        if self.size() <= batch_size:
-            return None
-        segs = self._storage[:batch_size]
-        self._storage = self._storage[batch_size:]
-        # random.shuffle(segs)
-
-        return {
-            k:
-            np.stack([seg[k]
-                      for seg in segs], axis=0) if k != 'hidden_state' else np.stack([seg[k] for seg in segs], axis=1)
-            for k in self.keys
-        }
-
-
-class ReplayQueue():
-    def __init__(self, maxsize, keys):
-        self._storage = []
-        self._maxsize = int(maxsize)
-        self._next_idx = 0
-        self.keys = keys
-
-    def size(self):
-        return len(self._storage)
-
-    def __len__(self):
-        return len(self._storage)
-
-    def put(self, seg):
-        if self._next_idx >= len(self._storage):
-            self._storage.append(seg)
-        else:
-            self._storage[self._next_idx] = seg
-        self._next_idx = (self._next_idx + 1) % self._maxsize
-
-    def get(self, batch_size):
-        if self.size() <= batch_size:
-            return None
-        idxes = np.random.choice(self.size(), batch_size, replace=False)
-        idxes = sorted(idxes, reverse=True)
-        segs = [self._storage.pop(i) for i in idxes]
-        self._next_idx = len(self._storage)
-        return {k: np.stack([seg[k] for seg in segs], axis=0) for k in self.keys}
-
-
 class CircularBuffer:
     def __init__(self, maxsize, reuse_times, keys):
         self._storage = []
@@ -92,7 +27,7 @@ class CircularBuffer:
         if len(self._storage) > self._maxsize:
             self._storage = self._storage[-self._maxsize:]
             self.used_times = self.used_times[-self._maxsize:]
-        # self._next_idx = len(self._storage) % self._maxsize
+        self._next_idx = len(self._storage) % self._maxsize
         self.received_sample += len(segs)
 
     def put(self, seg):
@@ -106,7 +41,7 @@ class CircularBuffer:
         self.received_sample += 1
 
     def get(self, batch_size):
-        if self.size() <= batch_size:
+        if self.size() < batch_size:
             return None
         idxes = np.random.choice(self.size(), batch_size, replace=False)
         idxes = sorted(idxes, reverse=True)
@@ -121,8 +56,14 @@ class CircularBuffer:
         self._next_idx = len(self._storage)
         return {k: np.stack([seg[k] for seg in segs], axis=1) for k in self.keys}
 
+    def get_util(self):
+        return len(self._storage) / self._maxsize
 
-class CircularBuffer2:
+    def get_received_sample(self):
+        return self.received_sample
+
+
+class CircularBufferNumpy:
     def __init__(self, maxsize, reuse_times, keys, shapes, pad_values):
         self._storage = {}
         for k in keys:
