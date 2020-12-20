@@ -10,7 +10,7 @@ for num_worker in ${num_workers[@]}
 do
     exp_name="release_128humanoid_env"${num_env}"worker"${num_worker}
     echo "current experiment ${exp_name}"
-    python run_async_ppo.py --exp_name ${exp_name} \
+    python main_mujoco.py --exp_name ${exp_name} \
                             --wandb_group ${group_name} \
                             --wandb_job ${job_name} \
                             --total_frames ${num_frames} \

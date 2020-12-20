@@ -14,8 +14,9 @@ import os
 import psutil
 from pgrep import pgrep
 
-from env.mujoco.env_with_memory import EnvWithMemory, DummyVecEnvWithMemory
+from env.mujoco.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from env.mujoco.model.model import ActorCritic
+from env.mujoco.genetype import COLLECT_KEYS, ROLLOUT_KEYS, BURN_IN_INPUT_KEYS, get_shapes
 from rl_utils.buffer import CircularBuffer
 from ray_utils.remote_server import ParameterServer, EpisodeRecorder
 from ray_utils.remote_actors import SimulationSupervisor, BufferCollector  # , GPULoader
@@ -72,28 +73,20 @@ args = parser.parse_args()
 kwargs = vars(args)
 
 
-def build_simple_env(kwargs):
-    return gym.make(kwargs['env_name'])
-
-
-# get state/action information from env
-init_env = build_simple_env(kwargs)
-kwargs['state_dim'] = init_env.observation_space.shape[0]
-kwargs['action_dim'] = init_env.action_space.shape[0]
-high = init_env.action_space.high
-low = init_env.action_space.low
-kwargs['action_loc'] = (high + low) / 2
-kwargs['action_scale'] = (high - low) / 2
-kwargs['continuous_env'] = True
-del init_env
+def build_simple_env(kwargs, seed=0):
+    env = gym.make(kwargs['env_name'])
+    env.seed(seed)
+    return env
 
 
 def build_worker_env(worker_id, kwargs):
-    env_fns = [
-        lambda: EnvWithMemory(build_simple_env, worker_id + i * kwargs['num_workers'], kwargs)
-        for i in range(kwargs['env_num'])
-    ]
-    return DummyVecEnvWithMemory(env_fns)
+    env_fns = []
+    for i in range(kwargs['env_num']):
+        env_id = worker_id + i * kwargs['num_workers']
+        seed = 12345 * env_id + kwargs['seed']
+        env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), ROLLOUT_KEYS,
+                                             COLLECT_KEYS, BURN_IN_INPUT_KEYS, SHAPES, kwargs))
+    return VecEnvWithMemory(env_fns)
 
 
 def build_worker_model(kwargs):
@@ -120,6 +113,19 @@ def train_learner_on_batch(learner, optimizer, data_batch, config):
                 entropy_loss=entropy_loss.item(),
                 grad_norm=grad_norm.item())
 
+
+# get state/action information from env
+init_env = build_simple_env(kwargs)
+kwargs['obs_dim'] = init_env.observation_space.shape[0]
+kwargs['action_dim'] = init_env.action_space.shape[0]
+high = init_env.action_space.high
+low = init_env.action_space.low
+kwargs['action_loc'] = (high + low) / 2
+kwargs['action_scale'] = (high - low) / 2
+kwargs['continuous_env'] = True
+del init_env
+
+SHAPES = get_shapes(kwargs)
 
 if __name__ == "__main__":
     if kwargs['record_mem']:
@@ -160,9 +166,8 @@ if __name__ == "__main__":
     init_weights = learner.get_weights()
 
     # initialize buffer
-    keys = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
     buffer_maxsize = config.batch_size * config.q_size
-    buffer = ray.remote(num_cpus=2)(CircularBuffer).remote(buffer_maxsize, config.reuse_times, keys)
+    buffer = ray.remote(num_cpus=2)(CircularBuffer).remote(buffer_maxsize, config.reuse_times, COLLECT_KEYS)
 
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)

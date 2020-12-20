@@ -15,7 +15,7 @@ do
     do
         exp_name="rec"${env_name}"_env"${num_env}"worker"${num_workers}"_seed"${seed}
         echo "current experiment ${exp_name}"
-        python run_async_ppo.py --exp_name ${exp_name} \
+        python main_sc2.py --exp_name ${exp_name} \
                                 --env_name ${env_name} \
                                 --wandb_group ${group_name} \
                                 --wandb_job ${job_name} \

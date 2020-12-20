@@ -15,6 +15,8 @@ class EnvWithMemory:
 
         self.chunk_len = kwargs['chunk_len']
         self.burn_in_len = kwargs['burn_in_len']
+        if np.all(['rnn_hidden' not in k for k in self.collect_keys]):
+            assert self.burn_in_len == 0 and len(self.burn_in_input_keys) == 0
         self.replay = kwargs['replay']
         self.min_return_chunk_num = kwargs['min_return_chunk_num']
         assert self.chunk_len % self.replay == 0
@@ -27,33 +29,25 @@ class EnvWithMemory:
         self.verbose = kwargs['verbose']
         self.reset()
 
-    def preprocess(self, obs, state, avail_action, agent_death):
+    def _preprocess(self, obs, state, avail_action, agent_death):
         return obs.astype(np.float32), state.astype(np.float32), avail_action.astype(np.float32), agent_death.astype(
             np.float32)
 
-    def reset(self):
-        if self.verbose and self.done:
-            print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
-        self.obs, self.state, self.avail_action, self.agent_death = self.preprocess(*self.env.reset())
-        self.actor_rnn_hidden, self.critic_rnn_hidden = self._init_rnn_hidden()
-        self.done = self.won = False
-        self.ep_step = self.ep_return = 0
-        self.reset_history()
+    def _get_model_input(self):
+        return self.obs, self.state, self.avail_action, self.actor_rnn_hidden, self.critic_rnn_hidden
 
     def _init_rnn_hidden(self):
         return (np.zeros(self.shapes['actor_rnn_hidden'],
                          dtype=np.float32), np.zeros(self.shapes['critic_rnn_hidden'], dtype=np.float32))
 
-    def reset_history(self):
-        self.history = {}
-        for k in self.rollout_keys:
-            if k in self.burn_in_input_keys:
-                self.history[k] = [np.zeros(self.shapes[k], dtype=np.float32) for _ in range(self.burn_in_len)]
-            else:
-                self.history[k] = []
-
-    def _get_model_input(self):
-        return self.obs, self.state, self.avail_action, self.actor_rnn_hidden, self.critic_rnn_hidden
+    def reset(self):
+        if self.verbose and self.done:
+            print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
+        self.obs, self.state, self.avail_action, self.agent_death = self._preprocess(*self.env.reset())
+        self.actor_rnn_hidden, self.critic_rnn_hidden = self._init_rnn_hidden()
+        self.done = self.won = False
+        self.ep_step = self.ep_return = 0
+        self.reset_history()
 
     def step(self, action, action_logits, value, actor_rnn_hidden, critic_rnn_hidden):
         if self.done:
@@ -72,7 +66,7 @@ class EnvWithMemory:
                 return [], [], self._get_model_input()
 
         n_obs, n_state, n_avail_action, r, n_agent_death, d, info = self.env.step(action)
-        n_obs, n_state, n_avail_action, n_agent_death = self.preprocess(n_obs, n_state, n_avail_action, n_agent_death)
+        n_obs, n_state, n_avail_action, n_agent_death = self._preprocess(n_obs, n_state, n_avail_action, n_agent_death)
 
         self.ep_return += r
         self.ep_step += 1
@@ -98,6 +92,14 @@ class EnvWithMemory:
         self.done = d or self.ep_step >= self.max_timesteps
         self.won = info.get('battle_won', False)
         return [], [], self._get_model_input()
+
+    def reset_history(self):
+        self.history = {}
+        for k in self.rollout_keys:
+            if k in self.burn_in_input_keys:
+                self.history[k] = [np.zeros(self.shapes[k], dtype=np.float32) for _ in range(self.burn_in_len)]
+            else:
+                self.history[k] = []
 
     def collect(self, bootstrap_value):
         v_target, adv = self.compute_gae(bootstrap_value)

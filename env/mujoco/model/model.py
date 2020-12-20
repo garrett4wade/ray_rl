@@ -23,12 +23,12 @@ class ActorCritic(nn.Module):
         self.action_scale = nn.Parameter(action_scale).detach().to(self.device)
         self.action_loc = nn.Parameter(action_loc).detach().to(self.device)
 
-        state_dim = kwargs['state_dim']
+        obs_dim = kwargs['obs_dim']
         action_dim = kwargs['action_dim']
         hidden_dim = kwargs['hidden_dim']
 
         self.action_dim = kwargs['action_dim']
-        self.feature_net = nn.Sequential(nn.Linear(state_dim, hidden_dim), nn.LayerNorm(normalized_shape=[hidden_dim]),
+        self.feature_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.LayerNorm(normalized_shape=[hidden_dim]),
                                          nn.ReLU(), nn.Linear(hidden_dim, hidden_dim),
                                          nn.LayerNorm(normalized_shape=[hidden_dim]), nn.ReLU())
         # actor
