@@ -120,10 +120,10 @@ class EnvWithMemory:
         while data_length > self.burn_in_len:
             chunk = {}
             for k, v in data_batch.items():
-                target_len = self.chunk_len + self.burn_in_len if k in self.burn_in_input_keys else self.chunk_len
+                target_len = (self.chunk_len + self.burn_in_len) if k in self.burn_in_input_keys else self.chunk_len
                 chunk[k] = v[chunk_cnt * self.step_size:chunk_cnt * self.step_size + target_len]
             for k, v in chunk.items():
-                target_len = self.chunk_len + self.burn_in_len if k in self.burn_in_input_keys else self.chunk_len
+                target_len = (self.chunk_len + self.burn_in_len) if k in self.burn_in_input_keys else self.chunk_len
                 if 'rnn_hidden' in k:
                     chunk[k] = v[0]
                 elif len(v) < target_len:

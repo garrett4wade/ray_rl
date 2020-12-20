@@ -1,5 +1,5 @@
 pkill -9 ray
-num_workers=(48)
+num_workers=(32)
 num_env=16
 min_return_chunk_num=32
 group_name="scalability"
@@ -20,8 +20,6 @@ do
                             --gpu_id 0 \
                             --min_return_chunk_num ${min_return_chunk_num} \
                             --batch_size 128 \
-                            --num_collectors 8 \
-                            --num_readers 4 \
                             --no_summary
     pkill -9 ray
 done
