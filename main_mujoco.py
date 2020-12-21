@@ -2,7 +2,6 @@ import gym
 import ray
 import time
 import wandb
-import nvgpu
 import argparse
 import numpy as np
 
@@ -20,6 +19,7 @@ from env.mujoco.genetype import COLLECT_KEYS, ROLLOUT_KEYS, BURN_IN_INPUT_KEYS, 
 from rl_utils.buffer import CircularBuffer
 from ray_utils.remote_server import ParameterServer, EpisodeRecorder
 from ray_utils.remote_actors import SimulationSupervisor, BufferCollector  # , GPULoader
+from ray_utils.init_ray import initialize_single_machine_ray
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
@@ -148,17 +148,7 @@ if __name__ == "__main__":
                          config=kwargs)
         config = wandb.config
 
-    # initialize ray
-    # additional 2 cpus are for parameter server & main script respectively
-    worker_cpus = config.cpu_per_worker * config.num_workers
-    supervisor_cpus = config.num_supervisors * (1 + 1 + config.num_readers)
-    collector_cpus = config.num_collectors
-    ps_rtrecorder_cpus = 1
-    buffer_cpus = 2
-    main_process_cpus = 1
-    ray.init(num_cpus=worker_cpus + supervisor_cpus + collector_cpus + ps_rtrecorder_cpus + buffer_cpus +
-             main_process_cpus,
-             num_gpus=len(nvgpu.available_gpus()))
+    initialize_single_machine_ray()
 
     # initialize learner, who is responsible for gradient update
     learner = build_learner_model(kwargs)

@@ -2,7 +2,6 @@ import gym
 import ray
 import time
 import wandb
-import nvgpu
 import argparse
 import numpy as np
 
@@ -21,13 +20,14 @@ from env.atari.wrappers import WarpFrame, FrameStack
 from rl_utils.buffer import CircularBuffer
 from ray_utils.remote_server import ParameterServer, EpisodeRecorder
 from ray_utils.remote_actors import SimulationSupervisor, BufferCollector  # , GPULoader
+from ray_utils.init_ray import initialize_single_machine_ray
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
 parser.add_argument("--exp_name", type=str, default='ray_test0', help='experiment name')
 parser.add_argument("--wandb_group", type=str, default='atari', help='weights & biases group name')
 parser.add_argument("--wandb_job", type=str, default='run 100M', help='weights & biases job name')
-parser.add_argument("--no_summary", action='store_true',  help='whether to write summary')
+parser.add_argument("--no_summary", action='store_true', help='whether to write summary')
 parser.add_argument("--record_mem", action='store_true', help='whether to store mem info, which is slow')
 parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
 parser.add_argument('--verbose', action='store_true')
@@ -65,7 +65,7 @@ parser.add_argument('--num_readers', type=int, default=4, help='# of data sendor
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=1, help='number of returns in ray.wait')
-parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
+parser.add_argument('--cpu_per_worker', type=float, default=1, help='cpu used per worker')
 parser.add_argument('--q_size', type=int, default=16, help='number of batches in replay buffer')
 
 # random seed
@@ -146,17 +146,7 @@ if __name__ == "__main__":
                          config=kwargs)
         config = wandb.config
 
-    # initialize ray
-    # additional 2 cpus are for parameter server & main script respectively
-    worker_cpus = config.cpu_per_worker * config.num_workers
-    supervisor_cpus = config.num_supervisors * (1 + 1 + config.num_readers)
-    collector_cpus = config.num_collectors
-    ps_rtrecorder_cpus = 1
-    buffer_cpus = 2
-    main_process_cpus = 1
-    ray.init(num_cpus=worker_cpus + supervisor_cpus + collector_cpus + ps_rtrecorder_cpus + buffer_cpus +
-             main_process_cpus,
-             num_gpus=len(nvgpu.available_gpus()))
+    initialize_single_machine_ray(config)
 
     # initialize learner, who is responsible for gradient update
     learner = build_learner_model(kwargs)
