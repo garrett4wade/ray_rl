@@ -1,6 +1,6 @@
 pkill -9 ray
-num_workers=(8)
-num_env=16
+num_workers=(1)
+num_env=1
 group_name="sample_speed"
 job_name="sample_speed"
 num_frames=10000000

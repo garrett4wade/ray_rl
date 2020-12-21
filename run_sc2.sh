@@ -1,7 +1,7 @@
 pkill -9 ray
 pkill -9 Main_Thread
 
-batch_size=512
+batch_size=256
 num_workers=50
 num_env=2
 group_name="sc2"

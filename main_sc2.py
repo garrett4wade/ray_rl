@@ -146,7 +146,7 @@ if __name__ == "__main__":
                          config=kwargs)
         config = wandb.config
 
-    initialize_single_machine_ray()
+    initialize_single_machine_ray(config)
 
     # initialize learner, who is responsible for gradient update
     learner = build_learner_model(kwargs)
