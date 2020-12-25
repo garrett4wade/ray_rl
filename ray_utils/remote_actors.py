@@ -1,8 +1,9 @@
 import ray
 import itertools
 from ray.util.queue import Queue
-from threading import Thread
+from threading import Thread, Lock
 from ray_utils.remote_functions import isNone
+from rl_utils.buffer import CircularBuffer
 
 
 class RolloutWorker:
@@ -142,22 +143,38 @@ class QueueReader:
             ray.get(ready_job)
 
 
-@ray.remote(num_cpus=1)
+@ray.remote(num_cpus=2)
 class SimulationSupervisor:
     def __init__(self, model_fn, worker_env_fn, ps, recorder, remote_buffer, kwargs):
         self.rollout_collector = RolloutCollector(model_fn=model_fn, worker_env_fn=worker_env_fn, ps=ps, kwargs=kwargs)
         self.ready_id_queue = Queue(maxsize=128)
-        self.queue_reader = QueueReader.remote(self.ready_id_queue, recorder, remote_buffer, kwargs['num_readers'])
+        self.buffer = remote_buffer
+        self.recorder = recorder
+        # self.queue_reader = QueueReader.remote(self.ready_id_queue, recorder, remote_buffer, kwargs['num_readers'])
+
         self.sample_job = Thread(target=self.sample_from_rollout_collector)
+        self.send_job = Thread(target=self.send_sample_to_buffer)
 
     def start(self):
         self.sample_job.start()
-        self.queue_reader.start.remote()
+        self.send_job.start()
 
     def sample_from_rollout_collector(self):
         while True:
             ready_sample_ids = self.rollout_collector.get_sample_ids()
             self.ready_id_queue.put(ready_sample_ids)
+
+    def send_sample_to_buffer(self):
+        while True:
+            ready_sample_ids = self.ready_id_queue.get()
+            all_batch_returns = ray.get(ready_sample_ids)
+            nested_data_batch, nested_info = zip(*all_batch_returns)
+            job = [
+                self.recorder.push.remote(list(itertools.chain.from_iterable(nested_info))),
+                self.buffer.put_batch.remote(list(itertools.chain.from_iterable(nested_data_batch)))
+            ]
+            while job:
+                _, job = ray.wait(job, num_returns=1)
 
     def get_ready_queue_util(self):
         return self.ready_id_queue.qsize() / 128
@@ -208,6 +225,25 @@ class BufferCollector:
 
     def get_batch_ref(self):
         return next(self._data_id_g)
+
+
+@ray.remote(num_cpus=2)
+class RemoteBuffer(CircularBuffer):
+    def __init__(self, maxsize, reuse_times, keys, ready_queue, batch_size):
+        self.ready_queue = ready_queue
+        self.batch_size = batch_size
+        self.lock = Lock()
+        super().__init__(maxsize, reuse_times, keys)
+
+        get_job = Thread(target=self.get_batch_into_queue)
+        get_job.start()
+
+    def get_batch_into_queue(self):
+        while True:
+            if len(self._storage) > self.batch_size and not self.ready_queue.full():
+                self.lock.acquire()
+                self.ready_queue.put(self.get(self.batch_size))
+                self.lock.release()
 
 
 # @ray.remote(num_cpus=1, num_gpus=len(nvgpu.available_gpus()))

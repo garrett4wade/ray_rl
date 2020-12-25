@@ -3,7 +3,9 @@ import argparse
 from env.atari.model.rec_model import ActorCritic
 from env.atari.wrappers import WarpFrame, FrameStack
 import time
+import ray
 import numpy as np
+import matplotlib.pyplot as plt
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
@@ -70,17 +72,23 @@ def _preprocess(obs, h):
     return np.stack([obs / 255.0]), np.stack([h])
 
 
-def rollout(model, env):
-    obs = env.reset()
-    h = np.zeros((1, 2 * kwargs['hidden_dim']), dtype=np.float32)
-    d = False
-    step = 0
-    while not d:
-        action, _, _, h = model.select_action(*_preprocess(obs, h))
-        h = h[0]
-        obs, _, d, _ = env.step(action[0])
-        step += 1
-    return step
+@ray.remote(num_cpus=.5)
+class Worker:
+    def __init__(self):
+        self.model = ActorCritic(False, kwargs)
+        self.env = build_simple_env()
+
+    def rollout(self):
+        obs = self.env.reset()
+        h = np.zeros((1, 2 * kwargs['hidden_dim']), dtype=np.float32)
+        d = False
+        step = 0
+        while not d:
+            action, _, _, h = self.model.select_action(*_preprocess(obs, h))
+            h = h[0]
+            obs, _, d, _ = self.env.step(action[0])
+            step += 1
+        return step
 
 
 init_env = build_simple_env()
@@ -89,11 +97,10 @@ kwargs['action_dim'] = init_env.action_space.n
 del init_env
 
 if __name__ == "__main__":
+    ray.init()
+    worker = Worker.remote()
     global_step = 0
-    model = ActorCritic(False, kwargs)
-    env = build_simple_env()
     start = time.time()
-    while True:
-        for _ in range(16):
-            global_step += rollout(model, env)
-        print(global_step / (time.time() - start))
+    for _ in range(10):
+        global_step += ray.get(worker.rollout.remote())
+    print(global_step / (time.time() - start))
