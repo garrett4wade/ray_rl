@@ -8,23 +8,37 @@ import time
 import numpy as np
 
 
+class StorageProperty:
+    def __init__(self, length, agent_num, keys, simplex_shapes):
+        self.length = length
+        self.keys = keys
+        self.agent_num = agent_num
+        self.simplex_shapes = simplex_shapes
+        self.split = [sum(self.simplex_shapes[:i]) for i in range(1, len(self.simplex_shapes))]
+        self.combined_shape = (sum(self.simplex_shapes), ) if agent_num == 1 else (agent_num, sum(self.simplex_shapes))
+
+
 class SharedCircularBuffer:
-    def __init__(self, maxsize, chunk_len, reuse_times, keys, simplex_shapes, produced_batch_size):
+    def __init__(self, maxsize, reuse_times, storage_properties, produced_batch_size):
         self.reuse_times = reuse_times
         self.maxsize = maxsize
         self.produced_batch_size = produced_batch_size
-        self.simplex_shapes = simplex_shapes
-        self.split = [sum(self.simplex_shapes[:i]) for i in range(1, len(self.simplex_shapes))]
-        self.keys = keys
+        self.storage_properties = storage_properties
+        self.storage_types = list(storage_properties.keys())
 
         self._read_ready = Condition(Lock())
+
         self._smm = SharedMemoryManager()
         self._smm.start()
 
-        self._storage_shm = self._smm.SharedMemory(size=4 * maxsize * chunk_len * sum(simplex_shapes))
-        self.storage = np.ndarray((chunk_len, maxsize, sum(simplex_shapes)),
-                                  dtype=np.float32,
-                                  buffer=self._storage_shm.buf)
+        self._storage_shm = {}
+        self.storage = {}
+        for storage_type, ppty in storage_properties.items():
+            self._storage_shm[storage_type] = self._smm.SharedMemory(size=4 * maxsize * ppty.length *
+                                                                     np.prod(ppty.combined_shape))
+            self.storage[storage_type] = np.ndarray((ppty.length, maxsize, *ppty.combined_shape),
+                                                    dtype=np.float32,
+                                                    buffer=self._storage_shm[storage_type].buf)
 
         self._used_times_shm = self._smm.SharedMemory(size=maxsize)
         self.used_times = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._used_times_shm.buf)
@@ -49,7 +63,7 @@ class SharedCircularBuffer:
         return self.size()
 
     def put(self, data_batch):
-        batch_size = len(data_batch)
+        batch_size = data_batch[self.storage_types[0]].shape[1]
 
         self._read_ready.acquire()
         try:
@@ -65,7 +79,8 @@ class SharedCircularBuffer:
         finally:
             self._read_ready.release()
 
-        self.storage[:, indices] = data_batch
+        for st in self.storage_types:
+            self.storage[st][:, indices] = data_batch[st].copy()
         self.used_times[indices] = 0
 
         self._read_ready.acquire()
@@ -75,7 +90,7 @@ class SharedCircularBuffer:
             self.received_sample += batch_size
             assert np.all(self.is_ready + self.is_busy + self.is_free)
             if sum(self.is_ready) >= batch_size:
-                self._read_ready.notify(1)
+                self._read_ready.notify_all()
         finally:
             self._read_ready.release()
 
@@ -84,7 +99,7 @@ class SharedCircularBuffer:
         self._read_ready.wait_for(lambda: sum(self.is_ready) >= self.produced_batch_size)
 
         indices = np.nonzero(self.is_ready)[0][:self.produced_batch_size]
-        data_batch = self.storage[:, indices].copy()
+        data_batch = {st: self.storage[st][:, indices].copy() for st in self.storage_types}
 
         # for used-up samples, is_ready -> is_free
         self.used_times[indices] += 1
@@ -95,46 +110,52 @@ class SharedCircularBuffer:
 
         assert np.all(self.is_ready + self.is_busy + self.is_free)
         self._read_ready.release()
-        return {k: v for k, v in zip(self.keys, np.split(data_batch, self.split, -1))}
+        result = {}
+        for st in self.storage_types:
+            ppty = self.storage_properties[st]
+            for k, v in zip(ppty.keys, np.split(data_batch[st], ppty.split, -1)):
+                result[k] = v
+        return result
 
 
 def write1(buffer):
     time.sleep(2)
-    cnt = 0
     while True:
-        buffer.put(np.ones((2, 3), dtype=np.float32))
-        cnt = (cnt + 1) % 16
+        data = {'main': np.ones((2, np.random.randint(1, 9), 11), dtype=np.float32)}
+        buffer.put(data)
         print("write process1 put something")
         time.sleep(1)
 
 
 def write2(buffer):
     time.sleep(2)
-    cnt = 0
     while True:
-        buffer.put(2 * np.ones((3, 3), dtype=np.float32))
-        cnt = (cnt + 1) % 16
+        data = {'main': 2 * np.ones((2, np.random.randint(1, 9), 11), dtype=np.float32)}
+        buffer.put(data)
         print("write process2 put something")
         time.sleep(1)
 
 
 def read1(buffer):
     while True:
-        data = buffer.get()
+        data = buffer.get()['obs']
         assert np.all(np.all(data == 1, axis=-1) + np.all(data == 2, axis=-1))
         print("read process1 get something")
+        print(data)
 
 
 def read2(buffer):
     while True:
-        data = buffer.get()
+        data = buffer.get()['obs']
         assert np.all(np.all(data == 1, axis=-1) + np.all(data == 2, axis=-1))
         print("read process2 get something")
+        print(data)
 
 
 if __name__ == "__main__":
     # ray.init()
-    buffer = SharedCircularBuffer(maxsize=16, chunk_len=2, reuse_times=2, combined_dim=3, produced_batch_size=3)
+    sps = {'main': StorageProperty(2, 1, ['obs', 'adv'], [10, 1])}
+    buffer = SharedCircularBuffer(maxsize=16, reuse_times=2, storage_properties=sps, produced_batch_size=16)
     p1 = Process(target=write1, args=(buffer, ))
     p2 = Process(target=write2, args=(buffer, ))
     p1.start()

@@ -9,6 +9,8 @@ def get_shapes(kwargs):
         'obs': (kwargs['obs_dim'], ),
         'action': (kwargs['action_dim'], ),
         'action_logits': (kwargs['action_dim'] * 2, ),
-        'value': (),
-        'reward': (),
+        'value': (1, ),
+        'reward': (1, ),
+        'adv': (1, ),
+        'value_target': (1, ),
     }
