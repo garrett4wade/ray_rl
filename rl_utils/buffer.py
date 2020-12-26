@@ -119,29 +119,6 @@ class CircularBufferNumpy:
         return data_batch
 
 
-class StorageProperty:
-    """defines basic properties for a specific shared storage block
-
-    Hopefully, all data needed can be concatenated along the last dim, such that
-    communication/copy from Ray to main process has the lowest cost.
-
-    However, there are different types of data that can not concatenated together
-    e.g. centralized & decentralized data in multiagent environments,
-         burn_in data & data for backpropagation
-    (or we MAY concatenate them together at the cost of memory)
-
-    Hence we classify all data we need into different storage types, and
-    concatenate data of the same type to reduce communication overhead.
-    """
-    def __init__(self, length, agent_num, keys, simplex_shapes):
-        self.length = length
-        self.keys = keys
-        self.agent_num = agent_num
-        self.simplex_shapes = simplex_shapes
-        self.split = [sum(self.simplex_shapes[:i]) for i in range(1, len(self.simplex_shapes))]
-        self.combined_shape = (sum(self.simplex_shapes), ) if agent_num == 1 else (agent_num, sum(self.simplex_shapes))
-
-
 class SharedCircularBuffer:
     def __init__(self, maxsize, reuse_times, storage_properties, produced_batch_size):
         self.reuse_times = reuse_times
@@ -167,14 +144,14 @@ class SharedCircularBuffer:
         self._used_times_shm = self._smm.SharedMemory(size=maxsize)
         self.used_times = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._used_times_shm.buf)
 
-        # if is_free is 1, then this block can be written but can't be read
+        # if is_free is 1, then the corresponding storage can be written but can't be read
         self._is_free_shm = self._smm.SharedMemory(size=maxsize)
         self.is_free = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._is_free_shm.buf)
         self.is_free[:] = np.ones((maxsize, ), dtype=np.uint8)[:]
-        # if is_busy is 1, then this block is being written
+        # if is_busy is 1, then the corresponding storage is being written
         self._is_busy_shm = self._smm.SharedMemory(size=maxsize)
         self.is_busy = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._is_busy_shm.buf)
-        # is is_ready is 1, then this block can be written & read
+        # is is_ready is 1, then the corresponding storage can be written & read
         self._is_ready_shm = self._smm.SharedMemory(size=maxsize)
         self.is_ready = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._is_ready_shm.buf)
 
