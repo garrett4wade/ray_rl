@@ -123,7 +123,8 @@ class CircularBufferNumpy:
 
 
 class SharedCircularBuffer:
-    def __init__(self, maxsize, reuse_times, storage_properties, produced_batch_size):
+    def __init__(self, maxsize, reuse_times, storage_properties, produced_batch_size, num_collectors):
+        self.num_collectors = num_collectors
         self.reuse_times = reuse_times
         self.maxsize = maxsize
         self.produced_batch_size = produced_batch_size
@@ -158,7 +159,8 @@ class SharedCircularBuffer:
         self._is_ready_shm = self._smm.SharedMemory(size=maxsize)
         self.is_ready = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._is_ready_shm.buf)
 
-        self.received_sample = 0
+        self._received_sample_shm = self._smm.SharedMemory(size=8)
+        self.received_sample = np.ndarray((), dtype=np.int64, buffer=self._received_sample_shm.buf)
 
     def size(self):
         return sum(self.is_ready)
@@ -177,9 +179,10 @@ class SharedCircularBuffer:
                 extend_indices = np.nonzero(self.is_ready)[0][:batch_size - len(indices)]
                 self.is_ready[extend_indices] = 0
                 indices = np.concatenate([indices, extend_indices])
-            assert len(indices) == batch_size, 'maxsize - # of busy_indices < batch size! try to increase buffer size!'
+            assert len(indices) == batch_size, ('maxsize - # of busy_indices < batch size! ' +
+                                                'Try to increase buffer size!')
             self.is_busy[indices] = 1
-            assert np.all(self.is_ready + self.is_busy + self.is_free)
+            # assert np.all(self.is_ready + self.is_busy + self.is_free)
         finally:
             self._read_ready.release()
 
@@ -189,19 +192,18 @@ class SharedCircularBuffer:
 
         self._read_ready.acquire()
         try:
-            self.received_sample += batch_size
             self.is_busy[indices] = 0
             self.is_ready[indices] = 1
             self.received_sample += batch_size
-            assert np.all(self.is_ready + self.is_busy + self.is_free)
-            if sum(self.is_ready) >= batch_size:
-                self._read_ready.notify_all()
+            # assert np.all(self.is_ready + self.is_busy + self.is_free)
+            if np.sum(self.is_ready) >= self.produced_batch_size:
+                self._read_ready.notify(self.num_collectors)
         finally:
             self._read_ready.release()
 
     def get(self):
         self._read_ready.acquire()
-        self._read_ready.wait_for(lambda: sum(self.is_ready) >= self.produced_batch_size)
+        self._read_ready.wait_for(lambda: np.sum(self.is_ready) >= self.produced_batch_size)
 
         indices = np.nonzero(self.is_ready)[0][:self.produced_batch_size]
         data_batch = {st: self.storage[st][:, indices].copy() for st in self.storage_types}
@@ -213,7 +215,7 @@ class SharedCircularBuffer:
         self.is_free[used_up_indices] = 1
         self.is_ready[used_up_indices] = 0
 
-        assert np.all(self.is_ready + self.is_busy + self.is_free)
+        # assert np.all(self.is_ready + self.is_busy + self.is_free)
         self._read_ready.release()
         result = {}
         for st in self.storage_types:
@@ -226,7 +228,7 @@ class SharedCircularBuffer:
         return self.size() / self.maxsize
 
     def get_received_sample(self):
-        return self.received_sample
+        return self.received_sample.item()
 
 
 class ReplayBuffer():

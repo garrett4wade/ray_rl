@@ -1,7 +1,9 @@
 import ray
 import itertools
-from multiprocessing import Queue, Process
-from threading import Thread
+import multiprocessing as mp
+import threading
+from queue import Queue as ThreadSafeQueue
+from torch import from_numpy
 
 
 class RolloutWorker:
@@ -96,56 +98,73 @@ class RolloutCollector:
         return next(self._data_id_g)
 
 
-class BufferWriter(Process):
-    def __init__(self, ready_queue, buffer):
-        super().__init__()
-        self.daemon = True
-        self.ready_queue = ready_queue
-        self.buffer = buffer
+# class BufferWriter(mp.Process):
+#     def __init__(self, ready_queue, buffer):
+#         super().__init__()
+#         self.daemon = True
+#         self.ready_queue = ready_queue
+#         self.buffer = buffer
 
-    def run(self):
-        while True:
-            blk = self.ready_queue.get()
-            self.buffer.put(blk)
+#     def run(self):
+#         while True:
+#             blk = self.ready_queue.get()
+#             self.buffer.put(blk)
 
 
 class SimulationSupervisor:
-    def __init__(self, model_fn, worker_env_fn, ps, recorder, buffer, kwargs):
+    def __init__(self, model_fn, worker_env_fn, ps, recorder, global_buffer, kwargs):
         self.rollout_collector = RolloutCollector(model_fn=model_fn, worker_env_fn=worker_env_fn, ps=ps, kwargs=kwargs)
-        self.ready_queue = Queue(maxsize=128)
-        self.buffer = buffer
+        self.global_buffer = global_buffer
         self.recorder = recorder
+        self.ready_id_queue = ThreadSafeQueue(maxsize=128)
 
-        self.sample_job = Thread(target=self.sample_from_rollout_collector)
-        self.buffer_writers = [BufferWriter(self.ready_queue, self.buffer) for _ in range(kwargs['num_writers'])]
+        self.sample_job = threading.Thread(target=self.sample_from_rollout_collector)
+        self.sample_job.daemon = True
+        self.put_job = threading.Thread(target=self.put_sample_into_buffer)
+        self.put_job.daemon = True
 
     def start(self):
         self.sample_job.start()
-        for writer in self.buffer_writers:
-            writer.start()
+        self.put_job.start()
 
     def sample_from_rollout_collector(self):
         self.record_job = []
         while True:
             ready_sample_ids = self.rollout_collector.get_sample_ids()
+            self.ready_id_queue.put(ready_sample_ids)
+
+    # TODO: to use 1 more level pipeline, copy Ray return data into local shared memory (shm)
+    # TODO: then use multiprocessing to put local shm data into buffer
+    def put_sample_into_buffer(self):
+        self.record_job = []
+        while True:
+            ready_sample_ids = self.ready_id_queue.get()
             all_batch_returns = ray.get(ready_sample_ids)
             storage_blocks, nested_info = zip(*all_batch_returns)
             for blk in storage_blocks:
-                self.ready_queue.put(blk)
+                self.global_buffer.put(blk)
             ray.get(self.record_job)
             self.record_job = self.recorder.push.remote(list(itertools.chain.from_iterable(nested_info)))
 
     def get_ready_queue_util(self):
-        return self.ready_queue.qsize() / 128
+        return self.ready_id_queue.qsize() / 128
 
 
-class BufferCollector(Process):
-    def __init__(self, buffer, global_queue):
+class BufferCollector(mp.Process):
+    def __init__(self, buffer, shm_tensor_dict, available_flag, ready):
         super().__init__()
         self.daemon = True
+        self.ready = ready
         self.buffer = buffer
-        self.global_queue = global_queue
+        self.shm_tensor_dict = shm_tensor_dict
+        self.available_flag = available_flag
 
     def run(self):
         while True:
-            self.global_queue.put(self.buffer.get())
+            self.ready.acquire()
+            self.ready.wait_for(lambda: self.available_flag == 0)
+            numpy_data_batch = self.buffer.get()
+            for k, v in numpy_data_batch.items():
+                self.shm_tensor_dict[k].copy_(from_numpy(v))
+            self.available_flag += 1
+            self.ready.release()

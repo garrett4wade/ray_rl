@@ -156,7 +156,7 @@ if __name__ == "__main__":
     # initialize buffer
     buffer_maxsize = config.batch_size * config.q_size
     buffer = SharedCircularBuffer(buffer_maxsize, config.reuse_times, EnvWithMemory.get_storage_properties(kwargs),
-                                  config.batch_size)
+                                  config.batch_size, config.num_collectors)
 
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
@@ -166,7 +166,7 @@ if __name__ == "__main__":
                              worker_env_fn=build_worker_env,
                              ps=ps,
                              recorder=recorder,
-                             buffer=buffer,
+                             global_buffer=buffer,
                              kwargs=kwargs) for _ in range(config.num_supervisors)
     ]
     # after starting simulation thread, workers asynchronously interact with
@@ -174,8 +174,19 @@ if __name__ == "__main__":
     for supervisor in supervisors:
         supervisor.start()
 
-    batch_queue = mp.Queue(maxsize=config.q_size)
-    buffer_collectors = [BufferCollector(buffer, batch_queue) for _ in range(kwargs['num_collectors'])]
+    shm_tensor_dicts = [
+        dict(
+            **{
+                k: torch.zeros(config.chunk_len, config.batch_size, *shape).share_memory_()
+                for k, shape in EnvWithMemory.get_collect_shapes(kwargs).items()
+            }) for _ in range(config.num_collectors)
+    ]
+    available_flags = [torch.zeros(1).share_memory_() for _ in range(config.num_collectors)]
+    readies = [mp.Condition(mp.Lock()) for _ in range(config.num_collectors)]
+    buffer_collectors = [
+        BufferCollector(buffer, shm_tensor_dicts[i], available_flags[i], readies[i])
+        for i in range(kwargs['num_collectors'])
+    ]
     for collector in buffer_collectors:
         collector.start()
 
@@ -185,13 +196,23 @@ if __name__ == "__main__":
     # main loop
     global_step = 0
     num_frames = 0
+    buffer_collector_cnt = 0
     while num_frames < kwargs['total_frames']:
         '''
             sample from buffer
         '''
         iter_start = time.time()
         # wait until there's enough data in buffer
-        data_batch = batch_queue.get()
+        while not available_flags[buffer_collector_cnt]:
+            buffer_collector_cnt = (buffer_collector_cnt + 1) % config.num_collectors
+        try:
+            readies[buffer_collector_cnt].acquire()
+            data_batch = shm_tensor_dicts[buffer_collector_cnt].copy()
+            available_flags[buffer_collector_cnt].copy_(torch.zeros(1))
+            readies[buffer_collector_cnt].notify()
+        finally:
+            readies[buffer_collector_cnt].release()
+            buffer_collector_cnt = (buffer_collector_cnt + 1) % config.num_collectors
         sample_time = time.time() - iter_start
 
         if ray_proc is None and config.record_mem:
@@ -207,7 +228,7 @@ if __name__ == "__main__":
         start = time.time()
         # convert numpy array to tensor and send them to desired device
         for k, v in data_batch.items():
-            data_batch[k] = torch.from_numpy(v).to(**learner.tpdv)
+            data_batch[k] = v.to(**learner.tpdv)
         load_gpu_time = time.time() - start
         # train learner
         loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)
@@ -261,14 +282,10 @@ if __name__ == "__main__":
                 'memory/cpu_util': process.cpu_percent() / 100,
             }
         memory_stat = {
-            'buffer/utilization':
-            buffer.get_util(),
-            'buffer/received_sample':
-            buffer.get_received_sample(),
-            'buffer/consumed_sample':
-            num_frames / kwargs['chunk_len'],
-            'buffer/ready_id_queue_util':
-            np.mean([supervisor.get_ready_queue_util() for supervisor in supervisors]),
+            'buffer/utilization': buffer.get_util(),
+            'buffer/received_sample': buffer.get_received_sample(),
+            'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
+            'buffer/ready_id_queue_util': np.mean([supervisor.get_ready_queue_util() for supervisor in supervisors]),
             **ray_mem_info,
             **main_mem_info,
         }
