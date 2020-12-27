@@ -1,9 +1,7 @@
 import ray
 import itertools
-from ray.util.queue import Queue
-from threading import Thread, Lock
-from ray_utils.remote_functions import isNone
-from rl_utils.buffer import CircularBuffer
+from multiprocessing import Queue, Process
+from threading import Thread
 
 
 class RolloutWorker:
@@ -39,7 +37,7 @@ class RolloutWorker:
         while True:
             model_outputs = self.model.select_action(*model_inputs)
             data_batches, infos, model_inputs = self.env.step(*model_outputs)
-            if len(data_batches) == 0:
+            if len(data_batches) == 0 or len(infos) == 0:
                 continue
             yield data_batches, infos
             # get new weights only when at least one of vectorized envs is done
@@ -98,160 +96,56 @@ class RolloutCollector:
         return next(self._data_id_g)
 
 
-@ray.remote(num_cpus=1)
-class ReadWorker:
-    def __init__(self, ready_id_queue, recorder, buffer):
-        self.recorder = recorder
+class BufferWriter(Process):
+    def __init__(self, ready_queue, buffer):
+        super().__init__()
+        self.daemon = True
+        self.ready_queue = ready_queue
         self.buffer = buffer
-        self.ready_id_queue = ready_id_queue
 
-    def send(self):
-        ready_sample_ids = self.ready_id_queue.get()
-        all_batch_returns = ray.get(ready_sample_ids)
-        nested_data_batch, nested_info = zip(*all_batch_returns)
-        job = [
-            self.recorder.push.remote(list(itertools.chain.from_iterable(nested_info))),
-            self.buffer.put_batch.remote(list(itertools.chain.from_iterable(nested_data_batch)))
-        ]
-        while job:
-            _, job = ray.wait(job, num_returns=1)
-
-
-@ray.remote(num_cpus=1)
-class QueueReader:
-    def __init__(self, ready_id_queue, recorder, buffer, num_readers):
-        self.num_readers = num_readers
-        self.read_workers = [ReadWorker.remote(ready_id_queue, recorder, buffer) for _ in range(self.num_readers)]
-        self.working_jobs = []
-        # job_hashing maps job id to worker index
-        self.job_hashing = {}
-
-    def start(self):
-        for i in range(self.num_readers):
-            job = self.read_workers[i].send.remote()
-            self.working_jobs.append(job)
-            self.job_hashing[job] = i
+    def run(self):
         while True:
-            ready_jobs, self.working_jobs = ray.wait(self.working_jobs, num_returns=1)
-            ready_job = ready_jobs[0]
-            worker_id = self.job_hashing[ready_job]
-            self.job_hashing.pop(ready_job)
-
-            new_job = self.read_workers[worker_id].send.remote()
-            self.working_jobs.append(new_job)
-            self.job_hashing[new_job] = worker_id
-            ray.get(ready_job)
+            blk = self.ready_queue.get()
+            self.buffer.put(blk)
 
 
-@ray.remote(num_cpus=2)
 class SimulationSupervisor:
-    def __init__(self, model_fn, worker_env_fn, ps, recorder, remote_buffer, kwargs):
+    def __init__(self, model_fn, worker_env_fn, ps, recorder, buffer, kwargs):
         self.rollout_collector = RolloutCollector(model_fn=model_fn, worker_env_fn=worker_env_fn, ps=ps, kwargs=kwargs)
-        self.ready_id_queue = Queue(maxsize=128)
-        self.buffer = remote_buffer
+        self.ready_queue = Queue(maxsize=128)
+        self.buffer = buffer
         self.recorder = recorder
-        # self.queue_reader = QueueReader.remote(self.ready_id_queue, recorder, remote_buffer, kwargs['num_readers'])
 
         self.sample_job = Thread(target=self.sample_from_rollout_collector)
-        self.send_job = Thread(target=self.send_sample_to_buffer)
+        self.buffer_writers = [BufferWriter(self.ready_queue, self.buffer) for _ in range(kwargs['num_writers'])]
 
     def start(self):
         self.sample_job.start()
-        self.send_job.start()
+        for writer in self.buffer_writers:
+            writer.start()
 
     def sample_from_rollout_collector(self):
+        self.record_job = []
         while True:
             ready_sample_ids = self.rollout_collector.get_sample_ids()
-            self.ready_id_queue.put(ready_sample_ids)
-
-    def send_sample_to_buffer(self):
-        while True:
-            ready_sample_ids = self.ready_id_queue.get()
             all_batch_returns = ray.get(ready_sample_ids)
-            nested_data_batch, nested_info = zip(*all_batch_returns)
-            job = [
-                self.recorder.push.remote(list(itertools.chain.from_iterable(nested_info))),
-                self.buffer.put_batch.remote(list(itertools.chain.from_iterable(nested_data_batch)))
-            ]
-            while job:
-                _, job = ray.wait(job, num_returns=1)
+            storage_blocks, nested_info = zip(*all_batch_returns)
+            for blk in storage_blocks:
+                self.ready_queue.put(blk)
+            ray.get(self.record_job)
+            self.record_job = self.recorder.push.remote(list(itertools.chain.from_iterable(nested_info)))
 
     def get_ready_queue_util(self):
-        return self.ready_id_queue.qsize() / 128
+        return self.ready_queue.qsize() / 128
 
 
-@ray.remote(num_cpus=1)
-class CollectWorker:
-    def __init__(self, buffer, batch_size):
-        self.batch_size = batch_size
+class BufferCollector(Process):
+    def __init__(self, buffer, global_queue):
+        super().__init__()
+        self.daemon = True
         self.buffer = buffer
+        self.global_queue = global_queue
 
-    def get(self):
-        data_batch = self.buffer.get.remote(self.batch_size)
-        while ray.get(isNone.remote(data_batch)):
-            data_batch = self.buffer.get.remote(self.batch_size)
-        return data_batch
-
-
-class BufferCollector:
-    def __init__(self, buffer, batch_size, num_collectors):
-        self.num_collectors = num_collectors
-        self.collect_workers = [CollectWorker.remote(buffer, batch_size) for _ in range(self.num_collectors)]
-        self.working_jobs = []
-        # job_hashing maps job id to worker index
-        self.job_hashing = {}
-
-        self._data_id_g = self._data_id_generator()
-
-    def _start(self):
-        for i in range(self.num_collectors):
-            job = self.collect_workers[i].get.remote()
-            self.working_jobs.append(job)
-            self.job_hashing[job] = i
-
-    def _data_id_generator(self):
-        # iteratively make worker active
-        self._start()
+    def run(self):
         while True:
-            ready_jobs, self.working_jobs = ray.wait(self.working_jobs, num_returns=1)
-            ready_job = ready_jobs[0]
-            worker_id = self.job_hashing[ready_job]
-            self.job_hashing.pop(ready_job)
-
-            new_job = self.collect_workers[worker_id].get.remote()
-            self.working_jobs.append(new_job)
-            self.job_hashing[new_job] = worker_id
-            yield ray.get(ready_job)
-
-    def get_batch_ref(self):
-        return next(self._data_id_g)
-
-
-@ray.remote(num_cpus=2)
-class RemoteBuffer(CircularBuffer):
-    def __init__(self, maxsize, reuse_times, keys, ready_queue, batch_size):
-        self.ready_queue = ready_queue
-        self.batch_size = batch_size
-        self.lock = Lock()
-        super().__init__(maxsize, reuse_times, keys)
-
-        get_job = Thread(target=self.get_batch_into_queue)
-        get_job.start()
-
-    def get_batch_into_queue(self):
-        while True:
-            if len(self._storage) > self.batch_size and not self.ready_queue.full():
-                self.lock.acquire()
-                self.ready_queue.put(self.get(self.batch_size))
-                self.lock.release()
-
-
-# @ray.remote(num_cpus=1, num_gpus=len(nvgpu.available_gpus()))
-# class GPULoader:
-#     def __init__(self, tpdv):
-#         self.tpdv = tpdv
-
-#     def load(self, data_batch):
-#         for k, v in data_batch.items():
-#             data_batch[k] = torch.from_numpy(v.copy()).to(**self.tpdv)
-#         return data_batch
+            self.global_queue.put(self.buffer.get())

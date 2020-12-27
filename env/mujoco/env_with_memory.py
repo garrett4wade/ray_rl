@@ -1,26 +1,46 @@
 import numpy as np
+from collections import namedtuple
 from scipy.signal import lfilter
+from collections import OrderedDict
+from rl_utils.utils import StorageProperty, get_simplex_shapes
+
+StorageBlock = namedtuple('StorageBlock', ['main'])
 
 
 class EnvWithMemory:
-    def __init__(self, env_fn, rollout_keys, collect_keys, burn_in_input_keys, shapes, kwargs):
-        self.env = env_fn(kwargs)
-        self.rollout_keys = rollout_keys
-        self.collect_keys = collect_keys
-        self.burn_in_input_keys = burn_in_input_keys
-        self.shapes = shapes
+    ROLLOUT_KEYS = ['obs', 'action', 'action_logits', 'value', 'reward']
+    COLLECT_KEYS = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
 
-        self.history_data_batches = []
+    def get_collect_shapes(kwargs):
+        return OrderedDict({
+            'obs': (kwargs['obs_dim'], ),
+            'action': (kwargs['action_dim'], ),
+            'action_logits': (kwargs['action_dim'] * 2, ),
+            'value': (1, ),
+            'adv': (1, ),
+            'value_target': (1, ),
+        })
+
+    def get_storage_properties(kwargs):
+        return OrderedDict({
+            "main":
+            StorageProperty(length=kwargs['chunk_len'],
+                            agent_num=1,
+                            keys=EnvWithMemory.COLLECT_KEYS,
+                            simplex_shapes=get_simplex_shapes(EnvWithMemory.get_collect_shapes(kwargs)))
+        })
+
+    def __init__(self, env_fn, kwargs):
+        self.env = env_fn(kwargs)
+        self.storage_properties = EnvWithMemory.get_storage_properties(kwargs)
+
+        self.stored_chunk_num = 0
+        self.history_storage_blocks = []
         self.history_ep_infos = []
 
         self.chunk_len = kwargs['chunk_len']
-        self.burn_in_len = kwargs['burn_in_len']
-        if np.all(['rnn_hidden' not in k for k in self.collect_keys]):
-            assert self.burn_in_len == 0 and len(self.burn_in_input_keys) == 0
-        self.replay = kwargs['replay']
+        self.step_size = self.chunk_len
         self.min_return_chunk_num = kwargs['min_return_chunk_num']
-        assert self.chunk_len % self.replay == 0
-        self.step_size = self.chunk_len // self.replay
 
         self.gamma = kwargs['gamma']
         self.lmbda = kwargs['lmbda']
@@ -35,9 +55,6 @@ class EnvWithMemory:
     def _get_model_input(self):
         return (self.obs, )
 
-    def _init_rnn_hidden(self):
-        return np.zeros(self.shapes['rnn_hidden'], dtype=np.float32)
-
     def reset(self):
         if self.verbose and self.done:
             print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
@@ -50,15 +67,16 @@ class EnvWithMemory:
         if self.done:
             # if env is done in the previous step, use bootstrap value
             # to compute gae and collect history data
-            self.history_data_batches += self.collect(value)
+            self.history_storage_blocks.append(self.collect(value))
             self.history_ep_infos.append(dict(ep_return=self.ep_return))
             self.reset()
-            if len(self.history_data_batches) >= self.min_return_chunk_num:
-                data_batches = self.history_data_batches
+            if self.stored_chunk_num >= self.min_return_chunk_num:
+                storage_blocks = self.history_storage_blocks
                 infos = self.history_ep_infos
-                self.history_data_batches = []
+                self.history_storage_blocks = []
                 self.history_ep_infos = []
-                return data_batches, infos, self._get_model_input()
+                self.stored_chunk_num = 0
+                return storage_blocks, infos, self._get_model_input()
             else:
                 return [], [], self._get_model_input()
 
@@ -71,7 +89,7 @@ class EnvWithMemory:
         self.history['obs'].append(self.obs)
         self.history['action'].append(action)
         self.history['action_logits'].append(action_logits)
-        self.history['reward'].append(r)
+        self.history['reward'].append(np.array([r], dtype=np.float32))
         self.history['value'].append(value)
 
         self.obs = n_obs
@@ -80,52 +98,53 @@ class EnvWithMemory:
 
     def reset_history(self):
         self.history = {}
-        for k in self.rollout_keys:
-            if k in self.burn_in_input_keys:
-                self.history[k] = [np.zeros(self.shapes[k], dtype=np.float32) for _ in range(self.burn_in_len)]
-            else:
-                self.history[k] = []
+        for k in EnvWithMemory.ROLLOUT_KEYS:
+            self.history[k] = []
 
     def collect(self, bootstrap_value):
         v_target, adv = self.compute_gae(bootstrap_value)
         data_batch = {}
-        for k in self.collect_keys:
-            if k in self.rollout_keys:
+        for k in EnvWithMemory.COLLECT_KEYS:
+            if k in EnvWithMemory.ROLLOUT_KEYS:
                 data_batch[k] = np.stack(self.history[k], axis=0)
             elif k == 'value_target':
                 data_batch[k] = v_target
             elif k == 'adv':
                 data_batch[k] = adv
-        return self.split_and_padding(data_batch)
+        concat_data_batch = self.concat_storage_type(data_batch)
+        return self.pad_then_reshape(concat_data_batch)
 
-    def split_and_padding(self, data_batch):
-        data_length = self.ep_step + self.burn_in_len
-        chunk_cnt = 0
-        chunks = []
-        while data_length > self.burn_in_len:
-            chunk = {}
-            for k, v in data_batch.items():
-                target_len = (self.chunk_len + self.burn_in_len) if k in self.burn_in_input_keys else self.chunk_len
-                chunk[k] = v[chunk_cnt * self.step_size:chunk_cnt * self.step_size + target_len]
-            for k, v in chunk.items():
-                target_len = (self.chunk_len + self.burn_in_len) if k in self.burn_in_input_keys else self.chunk_len
-                if 'rnn_hidden' in k:
-                    chunk[k] = v[0]
-                elif len(v) < target_len:
-                    pad = tuple([(0, target_len - len(v))] + [(0, 0)] * (v.ndim - 1))
-                    chunk[k] = np.pad(v, pad, 'constant', constant_values=0)
-            chunks.append(chunk)
-            data_length -= self.step_size
-            chunk_cnt += 1
-        return chunks
+    def pad_then_reshape(self, concat_data_batch):
+        chunk_num = int(np.ceil(self.ep_step / self.chunk_len))
+        target_len = chunk_num * self.chunk_len
+        for st, concat_v in concat_data_batch.items():
+            if len(concat_v) < target_len:
+                pad = tuple([(0, target_len - len(concat_v))] + [(0, 0)] * (concat_v.ndim - 1))
+                pad_concat_v = np.pad(concat_v, pad, 'constant', constant_values=0)
+            else:
+                pad_concat_v = concat_v
+            concat_data_batch[st] = pad_concat_v.reshape(self.chunk_len, chunk_num, *concat_v.shape[1:])
+        self.stored_chunk_num += chunk_num
+        return StorageBlock(**concat_data_batch)
+
+    def concat_storage_type(self, data_batch):
+        results = {}
+        for st, ppty in self.storage_properties.items():
+            results[st] = []
+            # NOTE: ppty.keys is ordered, thus concatenated result is also ordered
+            for k in ppty.keys:
+                results[st].append(data_batch[k])
+        return {st: np.concatenate(all_v, axis=-1) for st, all_v in results.items()}
 
     def compute_gae(self, bootstrap_value):
-        discounted_r = lfilter([1], [1, -self.gamma], self.history['reward'][::-1])[::-1]
+        reward = np.array(self.history['reward'], dtype=np.float32).squeeze(-1)
+        value = np.array(self.history['value'], dtype=np.float32).squeeze(-1)
+        discounted_r = lfilter([1], [1, -self.gamma], reward[::-1])[::-1]
         discount_factor = self.gamma**np.arange(self.ep_step, 0, -1)
         n_step_v = discounted_r + bootstrap_value * discount_factor
-        td_err = n_step_v - np.array(self.history['value'], dtype=np.float32)
+        td_err = n_step_v - value
         adv = lfilter([1], [1, -self.lmbda], td_err[::-1])[::-1]
-        return n_step_v, adv
+        return np.expand_dims(n_step_v, 1), np.expand_dims(adv, 1)
 
 
 class VecEnvWithMemory:
@@ -133,16 +152,20 @@ class VecEnvWithMemory:
         self.envs = [env_fn() for env_fn in env_fns]
 
     def step(self, *args):
-        data_batches, infos, model_inputs = [], [], []
+        storage_blocks, infos, model_inputs = [], [], []
         for i, env in enumerate(self.envs):
-            cur_data_batches, cur_infos, model_input = env.step(*[arg[i] for arg in args])
-            data_batches += cur_data_batches
+            cur_storage_blocks, cur_infos, model_input = env.step(*[arg[i] for arg in args])
+            storage_blocks += cur_storage_blocks
             infos += cur_infos
             model_inputs.append(model_input)
         stacked_model_inputs = []
         for inp in zip(*model_inputs):
             stacked_model_inputs.append(np.stack(inp))
-        return data_batches, infos, stacked_model_inputs
+        if len(storage_blocks) > 0:
+            concat_storage_block = StorageBlock(*[np.concatenate(blks, axis=1) for blks in zip(*storage_blocks)])
+        else:
+            concat_storage_block = ()
+        return concat_storage_block, infos, stacked_model_inputs
 
     def get_model_inputs(self):
         model_inputs = [env._get_model_input() for env in self.envs]

@@ -12,11 +12,11 @@ import torch.optim as optim
 import os
 import psutil
 from pgrep import pgrep
+import multiprocessing as mp
 
 from env.mujoco.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from env.mujoco.model.model import ActorCritic
-from env.mujoco.genetype import COLLECT_KEYS, ROLLOUT_KEYS, BURN_IN_INPUT_KEYS, get_shapes
-from rl_utils.buffer import CircularBuffer
+from rl_utils.buffer import SharedCircularBuffer
 from ray_utils.remote_server import ParameterServer, EpisodeRecorder
 from ray_utils.remote_actors import SimulationSupervisor, BufferCollector  # , GPULoader
 from ray_utils.init_ray import initialize_single_machine_ray
@@ -59,7 +59,8 @@ parser.add_argument('--min_return_chunk_num', type=int, default=32, help='minima
 # Ray distributed training parameters
 parser.add_argument('--num_supervisors', type=int, default=1, help='# of simulation supervisors')
 parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
-parser.add_argument('--num_readers', type=int, default=4, help='# of data sendors')
+parser.add_argument('--num_readers', type=int, default=1, help='# of data sendors')
+parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
 parser.add_argument('--num_returns', type=int, default=1, help='number of returns in ray.wait')
@@ -84,8 +85,7 @@ def build_worker_env(worker_id, kwargs):
     for i in range(kwargs['env_num']):
         env_id = worker_id + i * kwargs['num_workers']
         seed = 12345 * env_id + kwargs['seed']
-        env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), ROLLOUT_KEYS,
-                                             COLLECT_KEYS, BURN_IN_INPUT_KEYS, SHAPES, kwargs))
+        env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), kwargs))
     return VecEnvWithMemory(env_fns)
 
 
@@ -125,8 +125,6 @@ kwargs['action_scale'] = (high - low) / 2
 kwargs['continuous_env'] = True
 del init_env
 
-SHAPES = get_shapes(kwargs)
-
 if __name__ == "__main__":
     if kwargs['record_mem']:
         process = psutil.Process(os.getpid())
@@ -157,25 +155,29 @@ if __name__ == "__main__":
 
     # initialize buffer
     buffer_maxsize = config.batch_size * config.q_size
-    buffer = ray.remote(num_cpus=2)(CircularBuffer).remote(buffer_maxsize, config.reuse_times, COLLECT_KEYS)
+    buffer = SharedCircularBuffer(buffer_maxsize, config.reuse_times, EnvWithMemory.get_storage_properties(kwargs),
+                                  config.batch_size)
 
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
     recorder = EpisodeRecorder.remote()
     supervisors = [
-        SimulationSupervisor.remote(model_fn=build_worker_model,
-                                    worker_env_fn=build_worker_env,
-                                    ps=ps,
-                                    recorder=recorder,
-                                    remote_buffer=buffer,
-                                    kwargs=kwargs) for _ in range(config.num_supervisors)
+        SimulationSupervisor(model_fn=build_worker_model,
+                             worker_env_fn=build_worker_env,
+                             ps=ps,
+                             recorder=recorder,
+                             buffer=buffer,
+                             kwargs=kwargs) for _ in range(config.num_supervisors)
     ]
     # after starting simulation thread, workers asynchronously interact with
     # environments and send data into buffer via Ray backbone
     for supervisor in supervisors:
-        supervisor.start.remote()
+        supervisor.start()
 
-    buffer_collector = BufferCollector(buffer, config.batch_size, config.num_collectors)
+    batch_queue = mp.Queue(maxsize=config.q_size)
+    buffer_collectors = [BufferCollector(buffer, batch_queue) for _ in range(kwargs['num_collectors'])]
+    for collector in buffer_collectors:
+        collector.start()
 
     ray_proc_name = ['ray::Worker']  # , 'raylet', 'ray::Param', 'ray::Ret']
     ray_proc = None
@@ -189,7 +191,7 @@ if __name__ == "__main__":
         '''
         iter_start = time.time()
         # wait until there's enough data in buffer
-        data_batch = ray.get(buffer_collector.get_batch_ref())
+        data_batch = batch_queue.get()
         sample_time = time.time() - iter_start
 
         if ray_proc is None and config.record_mem:
@@ -260,13 +262,13 @@ if __name__ == "__main__":
             }
         memory_stat = {
             'buffer/utilization':
-            ray.get(buffer.get_util.remote()),
+            buffer.get_util(),
             'buffer/received_sample':
-            ray.get(buffer.get_received_sample.remote()),
+            buffer.get_received_sample(),
             'buffer/consumed_sample':
             num_frames / kwargs['chunk_len'],
             'buffer/ready_id_queue_util':
-            np.mean(ray.get([supervisor.get_ready_queue_util.remote() for supervisor in supervisors])),
+            np.mean([supervisor.get_ready_queue_util() for supervisor in supervisors]),
             **ray_mem_info,
             **main_mem_info,
         }

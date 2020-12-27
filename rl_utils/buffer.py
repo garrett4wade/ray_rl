@@ -64,6 +64,9 @@ class CircularBuffer:
     def get_received_sample(self):
         return self.received_sample
 
+    def get_storage(self):
+        return self._storage
+
 
 class CircularBufferNumpy:
     def __init__(self, maxsize, reuse_times, keys, shapes, pad_values):
@@ -164,7 +167,7 @@ class SharedCircularBuffer:
         return self.size()
 
     def put(self, data_batch):
-        batch_size = data_batch[self.storage_types[0]].shape[1]
+        batch_size = data_batch[0].shape[1]
 
         self._read_ready.acquire()
         try:
@@ -181,11 +184,12 @@ class SharedCircularBuffer:
             self._read_ready.release()
 
         for st in self.storage_types:
-            self.storage[st][:, indices] = data_batch[st].copy()
+            self.storage[st][:, indices] = getattr(data_batch, st).copy()
         self.used_times[indices] = 0
 
         self._read_ready.acquire()
         try:
+            self.received_sample += batch_size
             self.is_busy[indices] = 0
             self.is_ready[indices] = 1
             self.received_sample += batch_size
@@ -217,6 +221,12 @@ class SharedCircularBuffer:
             for k, v in zip(ppty.keys, np.split(data_batch[st], ppty.split, -1)):
                 result[k] = v
         return result
+
+    def get_util(self):
+        return self.size() / self.maxsize
+
+    def get_received_sample(self):
+        return self.received_sample
 
 
 class ReplayBuffer():

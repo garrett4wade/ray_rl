@@ -19,7 +19,7 @@ do
                             --num_workers ${num_worker} \
                             --gpu_id 0 \
                             --min_return_chunk_num ${min_return_chunk_num} \
-                            --batch_size 128 \
+                            --batch_size 10240 \
                             --no_summary
     pkill -9 ray
 done
