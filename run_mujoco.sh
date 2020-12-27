@@ -1,5 +1,5 @@
 pkill -9 ray
-num_workers=(32)
+num_workers=(48)
 num_env=16
 min_return_chunk_num=32
 group_name="shmbuf"
@@ -17,8 +17,9 @@ do
                             --seed ${seed} \
                             --env_num ${num_env} \
                             --num_workers ${num_worker} \
-                            --gpu_id 0 \
+                            --gpu_id 1 \
                             --min_return_chunk_num ${min_return_chunk_num} \
-                            --batch_size 10240
+                            --batch_size 10240 \
+                            --no_summary
     pkill -9 ray
 done

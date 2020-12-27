@@ -1,5 +1,4 @@
 import ray
-import itertools
 import multiprocessing as mp
 import threading
 from queue import Queue as ThreadSafeQueue
@@ -67,7 +66,7 @@ class RolloutCollector:
         # job_hashing maps job id to worker index
         self.job_hashing = {}
 
-        self._data_id_g = self._data_id_generator(num_returns=kwargs['num_returns'])
+        self._data_id_g = self._data_id_generator()
         print("---------------------------------------------------")
         print("              Workers starting ......              ")
         print("---------------------------------------------------")
@@ -78,21 +77,19 @@ class RolloutCollector:
             self.working_jobs.append(job)
             self.job_hashing[job] = i
 
-    def _data_id_generator(self, num_returns, timeout=None):
+    def _data_id_generator(self):
         # iteratively make worker active
         self._start()
         while True:
-            ready_jobs, self.working_jobs = ray.wait(self.working_jobs, num_returns=num_returns, timeout=timeout)
+            [ready_job], self.working_jobs = ray.wait(self.working_jobs, num_returns=1)
 
-            for ready_job in ready_jobs:
-                worker_id = self.job_hashing[ready_job]
-                self.job_hashing.pop(ready_job)
+            worker_id = self.job_hashing[ready_job]
+            self.job_hashing.pop(ready_job)
 
-                new_job = self.workers[worker_id].get.remote()
-                self.working_jobs.append(new_job)
-                self.job_hashing[new_job] = worker_id
-
-            yield ready_jobs
+            new_job = self.workers[worker_id].get.remote()
+            self.working_jobs.append(new_job)
+            self.job_hashing[new_job] = worker_id
+            yield ready_job
 
     def get_sample_ids(self):
         return next(self._data_id_g)
@@ -118,33 +115,31 @@ class SimulationSupervisor:
         self.recorder = recorder
         self.ready_id_queue = ThreadSafeQueue(maxsize=128)
 
-        self.sample_job = threading.Thread(target=self.sample_from_rollout_collector)
-        self.sample_job.daemon = True
-        self.put_job = threading.Thread(target=self.put_sample_into_buffer)
-        self.put_job.daemon = True
+        self.sample_job = threading.Thread(target=self.sample_from_rollout_collector, daemon=True)
+        self.put_jobs = [
+            threading.Thread(target=self.put_sample_into_buffer, daemon=True) for _ in range(kwargs['num_writers'])
+        ]
 
     def start(self):
         self.sample_job.start()
-        self.put_job.start()
+        for job in self.put_jobs:
+            job.start()
 
     def sample_from_rollout_collector(self):
         self.record_job = []
         while True:
-            ready_sample_ids = self.rollout_collector.get_sample_ids()
-            self.ready_id_queue.put(ready_sample_ids)
+            ready_sample_id = self.rollout_collector.get_sample_ids()
+            self.ready_id_queue.put(ready_sample_id)
 
-    # TODO: to use 1 more level pipeline, copy Ray return data into local shared memory (shm)
-    # TODO: then use multiprocessing to put local shm data into buffer
+    # TODO: i/o bound, may use asyncio?
     def put_sample_into_buffer(self):
         self.record_job = []
         while True:
-            ready_sample_ids = self.ready_id_queue.get()
-            all_batch_returns = ray.get(ready_sample_ids)
-            storage_blocks, nested_info = zip(*all_batch_returns)
-            for blk in storage_blocks:
-                self.global_buffer.put(blk)
+            ready_sample_id = self.ready_id_queue.get()
+            storage_block, infos = ray.get(ready_sample_id)
+            self.global_buffer.put(storage_block)
             ray.get(self.record_job)
-            self.record_job = self.recorder.push.remote(list(itertools.chain.from_iterable(nested_info)))
+            self.record_job = self.recorder.push.remote(infos)
 
     def get_ready_queue_util(self):
         return self.ready_id_queue.qsize() / 128

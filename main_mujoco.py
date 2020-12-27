@@ -60,12 +60,11 @@ parser.add_argument('--min_return_chunk_num', type=int, default=32, help='minima
 parser.add_argument('--num_supervisors', type=int, default=1, help='# of simulation supervisors')
 parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
 parser.add_argument('--num_readers', type=int, default=1, help='# of data sendors')
-parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
+parser.add_argument('--num_writers', type=int, default=2, help='# of buffer writers')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
-parser.add_argument('--num_returns', type=int, default=1, help='number of returns in ray.wait')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
-parser.add_argument('--q_size', type=int, default=16, help='number of batches in replay buffer')
+parser.add_argument('--q_size', type=int, default=8, help='number of batches in replay buffer')
 
 # random seed
 parser.add_argument('--seed', type=int, default=0, help='random seed')
