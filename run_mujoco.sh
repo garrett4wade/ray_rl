@@ -8,7 +8,7 @@ num_frames=10000000
 seed=986258
 for num_worker in ${num_workers[@]}
 do
-    exp_name="humanoid_env"${num_env}"worker"${num_worker}
+    exp_name="4writer_humanoid_env"${num_env}"worker"${num_worker}
     echo "current experiment ${exp_name}"
     python main_mujoco.py --exp_name ${exp_name} \
                             --wandb_group ${group_name} \
@@ -19,7 +19,6 @@ do
                             --num_workers ${num_worker} \
                             --gpu_id 1 \
                             --min_return_chunk_num ${min_return_chunk_num} \
-                            --batch_size 10240 \
-                            --no_summary
+                            --batch_size 10240
     pkill -9 ray
 done

@@ -57,10 +57,8 @@ parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode
 parser.add_argument('--min_return_chunk_num', type=int, default=32, help='minimal chunk number before env.collect')
 
 # Ray distributed training parameters
-parser.add_argument('--num_supervisors', type=int, default=1, help='# of simulation supervisors')
 parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
-parser.add_argument('--num_readers', type=int, default=1, help='# of data sendors')
-parser.add_argument('--num_writers', type=int, default=2, help='# of buffer writers')
+parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
@@ -160,18 +158,15 @@ if __name__ == "__main__":
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
     recorder = EpisodeRecorder.remote()
-    supervisors = [
-        SimulationSupervisor(model_fn=build_worker_model,
-                             worker_env_fn=build_worker_env,
-                             ps=ps,
-                             recorder=recorder,
-                             global_buffer=buffer,
-                             kwargs=kwargs) for _ in range(config.num_supervisors)
-    ]
+    supervisor = SimulationSupervisor(model_fn=build_worker_model,
+                                      worker_env_fn=build_worker_env,
+                                      ps=ps,
+                                      recorder=recorder,
+                                      global_buffer=buffer,
+                                      kwargs=kwargs)
     # after starting simulation thread, workers asynchronously interact with
     # environments and send data into buffer via Ray backbone
-    for supervisor in supervisors:
-        supervisor.start()
+    supervisor.start()
 
     shm_tensor_dicts = [
         dict(
@@ -284,7 +279,7 @@ if __name__ == "__main__":
             'buffer/utilization': buffer.get_util(),
             'buffer/received_sample': buffer.get_received_sample(),
             'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
-            'buffer/ready_id_queue_util': np.mean([supervisor.get_ready_queue_util() for supervisor in supervisors]),
+            'buffer/ready_id_queue_util': supervisor.get_ready_queue_util(),
             **ray_mem_info,
             **main_mem_info,
         }

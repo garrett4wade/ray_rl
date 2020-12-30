@@ -52,7 +52,7 @@ class RolloutWorker:
 
 class RolloutCollector:
     def __init__(self, model_fn, worker_env_fn, ps, kwargs):
-        self.num_workers = int(kwargs['num_workers'] / kwargs['num_supervisors'])
+        self.num_workers = int(kwargs['num_workers'])
         self.ps = ps
         self.workers = [
             ray.remote(num_cpus=kwargs['cpu_per_worker'])(RolloutWorker).remote(worker_id=i,
