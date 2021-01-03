@@ -46,7 +46,7 @@ class ActorCritic(nn.Module):
         x, (h1, c1) = self.rnn(x, (h0.contiguous(), c0.contiguous()))
         h_out = torch.cat((h1, c1), dim=-1)
         action_logits = self.action_layer(x)
-        value = self.value_layer(x).squeeze(-1)
+        value = self.value_layer(x)
         return action_logits, value, h_out
 
     @torch.no_grad()
@@ -60,13 +60,13 @@ class ActorCritic(nn.Module):
         x = x.squeeze_(0)
         h_out = torch.cat((h1, c1), dim=-1).transpose(0, 1)
         action_logits = self.action_layer(x)
-        value = self.value_layer(x).squeeze(-1)
+        value = self.value_layer(x)
 
         action = Categorical(logits=action_logits).sample()
         return action.numpy(), action_logits.numpy(), value.numpy(), h_out.numpy()
 
     def compute_loss(self, obs, action, action_logits, adv, value, value_target, pad_mask, rnn_hidden):
-        action = action.to(torch.long)
+        action = action.to(torch.long).squeeze(-1)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
         target_action_logits, cur_state_value, _ = self(obs, rnn_hidden)
@@ -76,7 +76,7 @@ class ActorCritic(nn.Module):
         behavior_action_logprobs = Categorical(logits=action_logits).log_prob(action)
 
         log_rhos = target_action_logprobs - behavior_action_logprobs.detach()
-        rhos = log_rhos.exp()
+        rhos = log_rhos.exp().unsqueeze(-1)
 
         p_surr = adv * torch.clamp(rhos, 1 - self.clip_ratio, 1 + self.clip_ratio)
         p_loss = (-torch.min(p_surr, rhos * adv) * pad_mask).mean()
@@ -85,7 +85,7 @@ class ActorCritic(nn.Module):
         v_loss = torch.max(F.mse_loss(cur_state_value, value_target), F.mse_loss(cur_v_clipped, value_target))
         v_loss = (v_loss * pad_mask).mean()
 
-        entropy_loss = (-target_dist.entropy() * pad_mask).mean()
+        entropy_loss = (-target_dist.entropy() * pad_mask.squeeze(-1)).mean()
         return v_loss, p_loss, entropy_loss
 
     def get_weights(self):

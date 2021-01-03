@@ -8,16 +8,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import multiprocessing as mp
 
 import os
 import psutil
 from pgrep import pgrep
 
 from env.atari.env_with_memory import EnvWithMemory, VecEnvWithMemory
-from env.atari.genetype import get_shapes, COLLECT_KEYS, ROLLOUT_KEYS, BURN_IN_INPUT_KEYS
 from env.atari.model.rec_model import ActorCritic
 from env.atari.wrappers import WarpFrame, FrameStack
-from rl_utils.buffer import CircularBuffer
+from rl_utils.buffer import SharedCircularBuffer
 from ray_utils.remote_server import ParameterServer, EpisodeRecorder
 from ray_utils.remote_actors import SimulationSupervisor, BufferCollector  # , GPULoader
 from ray_utils.init_ray import initialize_single_machine_ray
@@ -59,14 +59,12 @@ parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode
 parser.add_argument('--min_return_chunk_num', type=int, default=64, help='minimal chunk number before env.collect')
 
 # Ray distributed training parameters
-parser.add_argument('--num_supervisors', type=int, default=1, help='# of simulation supervisors')
 parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
-parser.add_argument('--num_readers', type=int, default=4, help='# of data sendors')
+parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
-parser.add_argument('--num_returns', type=int, default=1, help='number of returns in ray.wait')
-parser.add_argument('--cpu_per_worker', type=float, default=1, help='cpu used per worker')
-parser.add_argument('--q_size', type=int, default=16, help='number of batches in replay buffer')
+parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
+parser.add_argument('--q_size', type=int, default=8, help='number of batches in replay buffer')
 
 # random seed
 parser.add_argument('--seed', type=int, default=0, help='random seed')
@@ -87,8 +85,7 @@ def build_worker_env(worker_id, kwargs):
     for i in range(kwargs['env_num']):
         env_id = worker_id + i * kwargs['num_workers']
         seed = 12345 * env_id + kwargs['seed']
-        env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), ROLLOUT_KEYS,
-                                             COLLECT_KEYS, BURN_IN_INPUT_KEYS, SHAPES, kwargs))
+        env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), kwargs))
     return VecEnvWithMemory(env_fns)
 
 
@@ -119,11 +116,9 @@ def train_learner_on_batch(learner, optimizer, data_batch, config):
 
 # get state/action information from env
 init_env = build_simple_env(kwargs)
-kwargs['obs_dim'] = (84, 84, 4)
+kwargs['obs_dim'] = (4, 84, 84)
 kwargs['action_dim'] = init_env.action_space.n
 del init_env
-
-SHAPES = get_shapes(kwargs)
 
 if __name__ == "__main__":
     if kwargs['record_mem']:
@@ -155,25 +150,40 @@ if __name__ == "__main__":
 
     # initialize buffer
     buffer_maxsize = config.batch_size * config.q_size
-    buffer = ray.remote(num_cpus=2)(CircularBuffer).remote(buffer_maxsize, config.reuse_times, COLLECT_KEYS)
+    buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times, 
+                                  EnvWithMemory.get_shapes(kwargs), config.batch_size, 
+                                  config.num_collectors, True, EnvWithMemory.get_rnn_hidden_shape(kwargs))
 
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
     recorder = EpisodeRecorder.remote()
-    supervisors = [
-        SimulationSupervisor.remote(model_fn=build_worker_model,
-                                    worker_env_fn=build_worker_env,
-                                    ps=ps,
-                                    recorder=recorder,
-                                    remote_buffer=buffer,
-                                    kwargs=kwargs) for _ in range(config.num_supervisors)
-    ]
+    supervisor = SimulationSupervisor(model_fn=build_worker_model,
+                                      worker_env_fn=build_worker_env,
+                                      ps=ps,
+                                      recorder=recorder,
+                                      global_buffer=buffer,
+                                      kwargs=kwargs)
     # after starting simulation thread, workers asynchronously interact with
     # environments and send data into buffer via Ray backbone
-    for supervisor in supervisors:
-        supervisor.start.remote()
+    supervisor.start()
 
-    buffer_collector = BufferCollector(buffer, config.batch_size, config.num_collectors)
+    shm_tensor_dicts = [
+        dict(
+            **{
+                k: torch.zeros(config.chunk_len, config.batch_size, *shape).share_memory_()
+                for k, shape in EnvWithMemory.get_shapes(kwargs).items()
+            }) for _ in range(config.num_collectors)
+    ]
+    for td in shm_tensor_dicts:
+        td['rnn_hidden'] = torch.zeros(1, config.batch_size, config.hidden_dim * 2).share_memory_()
+    available_flags = [torch.zeros(1).share_memory_() for _ in range(config.num_collectors)]
+    readies = [mp.Condition(mp.Lock()) for _ in range(config.num_collectors)]
+    buffer_collectors = [
+        BufferCollector(buffer, shm_tensor_dicts[i], available_flags[i], readies[i])
+        for i in range(kwargs['num_collectors'])
+    ]
+    for collector in buffer_collectors:
+        collector.start()
 
     ray_proc_name = ['ray::Worker']  # , 'raylet', 'ray::Param', 'ray::Ret']
     ray_proc = None
@@ -181,13 +191,23 @@ if __name__ == "__main__":
     # main loop
     global_step = 0
     num_frames = 0
+    buffer_collector_cnt = 0
     while num_frames < kwargs['total_frames']:
         '''
             sample from buffer
         '''
         iter_start = time.time()
         # wait until there's enough data in buffer
-        data_batch = ray.get(buffer_collector.get_batch_ref())
+        while not available_flags[buffer_collector_cnt]:
+            buffer_collector_cnt = (buffer_collector_cnt + 1) % config.num_collectors
+        try:
+            readies[buffer_collector_cnt].acquire()
+            data_batch = shm_tensor_dicts[buffer_collector_cnt].copy()
+            available_flags[buffer_collector_cnt].copy_(torch.zeros(1))
+            readies[buffer_collector_cnt].notify()
+        finally:
+            readies[buffer_collector_cnt].release()
+            buffer_collector_cnt = (buffer_collector_cnt + 1) % config.num_collectors
         sample_time = time.time() - iter_start
 
         if ray_proc is None and config.record_mem:
@@ -195,7 +215,7 @@ if __name__ == "__main__":
 
         # pull from remote return recorder
         return_stat_job = recorder.pull.remote()
-        num_frames += np.prod(data_batch['adv'].shape[:2])
+        num_frames += torch.sum(data_batch['pad_mask']).item()
         global_step += 1
         '''
             update !
@@ -203,7 +223,7 @@ if __name__ == "__main__":
         start = time.time()
         # convert numpy array to tensor and send them to desired device
         for k, v in data_batch.items():
-            data_batch[k] = torch.from_numpy(v).to(**learner.tpdv)
+            data_batch[k] = v.to(**learner.tpdv)
         load_gpu_time = time.time() - start
         # train learner
         loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)
@@ -257,16 +277,10 @@ if __name__ == "__main__":
                 'memory/cpu_util': process.cpu_percent() / 100,
             }
         memory_stat = {
-            'buffer/utilization':
-            ray.get(buffer.get_util.remote()),
-            'buffer/received_sample':
-            ray.get(buffer.get_received_sample.remote()),
-            'buffer/consumed_sample':
-            num_frames / kwargs['chunk_len'],
-            'buffer/ready_id_queue_util':
-            np.mean(ray.get([supervisor.get_ready_queue_util.remote() for supervisor in supervisors])),
-            # 'buffer/ray_wait_time':
-            # np.mean(ray.get([supervisor.get_wait_time.remote() for supervisor in supervisors])),
+            'buffer/utilization': buffer.get_util(),
+            'buffer/received_sample': buffer.get_received_sample(),
+            'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
+            'buffer/ready_id_queue_util': supervisor.get_ready_queue_util(),
             **ray_mem_info,
             **main_mem_info,
         }

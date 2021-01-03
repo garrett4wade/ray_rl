@@ -37,10 +37,10 @@ class RolloutWorker:
         model_inputs = self.env.get_model_inputs()
         while True:
             model_outputs = self.model.select_action(*model_inputs)
-            data_batches, infos, model_inputs = self.env.step(*model_outputs)
-            if len(data_batches) == 0 or len(infos) == 0:
+            storage_block, infos, model_inputs = self.env.step(*model_outputs)
+            if storage_block is None or len(infos) == 0:
                 continue
-            yield data_batches, infos
+            yield storage_block, infos
             # get new weights only when at least one of vectorized envs is done
             if ray.get(self.pull_job) != self.weight_hash:
                 self.get_new_weights()
@@ -137,7 +137,7 @@ class SimulationSupervisor:
         while True:
             ready_sample_id = self.ready_id_queue.get()
             storage_block, infos = ray.get(ready_sample_id)
-            self.global_buffer.put(storage_block)
+            self.global_buffer.put(*storage_block)
             ray.get(self.record_job)
             self.record_job = self.recorder.push.remote(infos)
 

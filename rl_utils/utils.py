@@ -28,7 +28,7 @@ class StorageProperty:
 
 
 def get_simplex_shapes(shapes):
-    return [np.prod(shape) for shape in shapes.values()]
+    return [int(np.prod(shape)) for shape in shapes.values()]
 
 
 def get_total_size(o, handlers={}, verbose=False):

@@ -1,5 +1,6 @@
 import numpy as np
 import random
+from rl_utils.utils import get_simplex_shapes
 from multiprocessing.managers import SharedMemoryManager
 from multiprocessing import Lock, Condition
 
@@ -123,27 +124,31 @@ class CircularBufferNumpy:
 
 
 class SharedCircularBuffer:
-    def __init__(self, maxsize, reuse_times, storage_properties, produced_batch_size, num_collectors):
-        self.num_collectors = num_collectors
+    def __init__(self, maxsize, chunk_len, reuse_times, shapes, produced_batch_size, num_collectors, use_rnn=False, rnn_hidden_shape=None):
         self.reuse_times = reuse_times
         self.maxsize = maxsize
+        self.chunk_len = chunk_len
         self.produced_batch_size = produced_batch_size
-        self.storage_properties = storage_properties
-        self.storage_types = list(storage_properties.keys())
+        self.num_collectors = num_collectors
+        self.shapes = shapes
+        self.simplex_shapes = get_simplex_shapes(shapes)
+        self.split = [sum(self.simplex_shapes[:i]) for i in range(1, len(self.simplex_shapes))]
 
         self._read_ready = Condition(Lock())
 
         self._smm = SharedMemoryManager()
         self._smm.start()
 
-        self._storage_shm = {}
-        self.storage = {}
-        for storage_type, ppty in storage_properties.items():
-            self._storage_shm[storage_type] = self._smm.SharedMemory(size=4 * maxsize * ppty.length *
-                                                                     np.prod(ppty.combined_shape))
-            self.storage[storage_type] = np.ndarray((ppty.length, maxsize, *ppty.combined_shape),
-                                                    dtype=np.float32,
-                                                    buffer=self._storage_shm[storage_type].buf)
+        self._storage_shm = self._smm.SharedMemory(size=4 * maxsize * chunk_len * sum(self.simplex_shapes))
+        self.storage = np.ndarray((chunk_len, maxsize, sum(self.simplex_shapes)),
+                                   dtype=np.float32,
+                                   buffer=self._storage_shm.buf)
+        
+        self.use_rnn = use_rnn
+        if use_rnn:
+            self.rnn_hiddep_shape = rnn_hidden_shape
+            self._rnn_hidden_shm = self._smm.SharedMemory(size=4 * maxsize * np.prod(rnn_hidden_shape))
+            self.rnn_storage = np.ndarray((rnn_hidden_shape[0], maxsize, rnn_hidden_shape[1]), dtype=np.float32, buffer=self._rnn_hidden_shm.buf)
 
         self._used_times_shm = self._smm.SharedMemory(size=maxsize)
         self.used_times = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._used_times_shm.buf)
@@ -168,8 +173,8 @@ class SharedCircularBuffer:
     def __len__(self):
         return self.size()
 
-    def put(self, data_batch):
-        batch_size = data_batch[0].shape[1]
+    def put(self, data_batch, rnn_hidden_batch=None):
+        batch_size = data_batch.shape[1]
 
         self._read_ready.acquire()
         try:
@@ -186,8 +191,9 @@ class SharedCircularBuffer:
         finally:
             self._read_ready.release()
 
-        for st in self.storage_types:
-            self.storage[st][:, indices] = getattr(data_batch, st).copy()
+        self.storage[:, indices] = data_batch.copy()
+        if self.use_rnn:
+            self.rnn_storage[:, indices] = rnn_hidden_batch.copy()
         self.used_times[indices] = 0
 
         self._read_ready.acquire()
@@ -206,7 +212,9 @@ class SharedCircularBuffer:
         self._read_ready.wait_for(lambda: np.sum(self.is_ready) >= self.produced_batch_size)
 
         indices = np.nonzero(self.is_ready)[0][:self.produced_batch_size]
-        data_batch = {st: self.storage[st][:, indices].copy() for st in self.storage_types}
+        data_batch = self.storage[:, indices].copy()
+        if self.use_rnn:
+            rnn_hidden_batch = self.rnn_storage[:, indices].copy()
 
         # for used-up samples, is_ready -> is_free
         self.used_times[indices] += 1
@@ -217,12 +225,10 @@ class SharedCircularBuffer:
 
         # assert np.all(self.is_ready + self.is_busy + self.is_free)
         self._read_ready.release()
-        result = {}
-        for st in self.storage_types:
-            ppty = self.storage_properties[st]
-            for k, v in zip(ppty.keys, np.split(data_batch[st], ppty.split, -1)):
-                result[k] = v
-        return result
+        data_dict = {k: v.reshape(self.chunk_len, self.produced_batch_size, *shp) for k, v, shp in zip(self.shapes.keys(), np.split(data_batch, self.split, axis=-1), self.shapes.values())}
+        if self.use_rnn:
+            data_dict['rnn_hidden'] = rnn_hidden_batch
+        return data_dict
 
     def get_util(self):
         return self.size() / self.maxsize

@@ -1,29 +1,32 @@
 import numpy as np
-from collections import namedtuple
-from scipy.signal import lfilter
 from collections import OrderedDict
-from rl_utils.utils import StorageProperty, get_simplex_shapes
-
-StorageBlock = namedtuple('StorageBlock', ['main'])
+from scipy.signal import lfilter
 
 
 class EnvWithMemory:
-    ROLLOUT_KEYS = ['obs', 'action', 'action_logits', 'value', 'reward']
-    COLLECT_KEYS = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target']
+    # NOTE: rnn_hidden must be the last one in keys
+    ROLLOUT_KEYS = ['obs', 'action', 'action_logits', 'value', 'reward', 'pad_mask', 'rnn_hidden']
+    COLLECT_KEYS = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target', 'pad_mask', 'rnn_hidden']
+    assert 'rnn_hidden' not in ROLLOUT_KEYS or 'rnn_hidden' == ROLLOUT_KEYS[-1]
+    assert 'rnn_hidden' not in COLLECT_KEYS or 'rnn_hidden' == COLLECT_KEYS[-1]
 
     def get_shapes(kwargs):
-        return OrderedDict({
-            'obs': (kwargs['obs_dim'], ),
-            'action': (kwargs['action_dim'], ),
-            'action_logits': (kwargs['action_dim'] * 2, ),
+        return {
+            'obs': kwargs['obs_dim'],
+            'action': (1, ),
+            'action_logits': (kwargs['action_dim'], ),
             'value': (1, ),
             'adv': (1, ),
             'value_target': (1, ),
-        })
-
+            'pad_mask': (1, ),
+        }
+    
+    def get_rnn_hidden_shape(kwargs):
+        return (1, kwargs['hidden_dim'] * 2)
 
     def __init__(self, env_fn, kwargs):
         self.env = env_fn(kwargs)
+        self.rnn_hidden_shape = EnvWithMemory.get_rnn_hidden_shape(kwargs)
 
         self.stored_chunk_num = 0
         self.history_storage_blocks = []
@@ -41,20 +44,25 @@ class EnvWithMemory:
         self.reset()
 
     def _preprocess(self, obs):
-        return obs.astype(np.float32)
+        obs = np.transpose(obs, [2, 0, 1]).astype(np.float32)
+        return obs / 255.0
 
     def _get_model_input(self):
-        return (self.obs, )
+        return self.obs, self.rnn_hidden
+
+    def _init_rnn_hidden(self):
+        return np.zeros(self.rnn_hidden_shape, dtype=np.float32)
 
     def reset(self):
         if self.verbose and self.done:
             print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
         self.obs = self._preprocess(self.env.reset())
+        self.rnn_hidden = self._init_rnn_hidden()
         self.done = False
         self.ep_step = self.ep_return = 0
         self.reset_history()
 
-    def step(self, action, action_logits, value):
+    def step(self, action, action_logits, value, rnn_hidden):
         if self.done:
             # if env is done in the previous step, use bootstrap value
             # to compute gae and collect history data
@@ -82,8 +90,11 @@ class EnvWithMemory:
         self.history['action_logits'].append(action_logits)
         self.history['reward'].append(np.array([r], dtype=np.float32))
         self.history['value'].append(value)
+        self.history['rnn_hidden'].append(self.rnn_hidden)
+        self.history['pad_mask'].append(np.array([1 - self.done], dtype=np.float32))
 
         self.obs = n_obs
+        self.rnn_hidden = rnn_hidden
         self.done = d or self.ep_step >= self.max_timesteps
         return [], [], self._get_model_input()
 
@@ -102,10 +113,11 @@ class EnvWithMemory:
                 data_batch[k] = v_target
             elif k == 'adv':
                 data_batch[k] = adv
-        concat_data_batch = np.concatenate([v.reshape(-1) for v in data_batch.values()], axis=-1)
-        return self.to_chunk(concat_data_batch)
+        concat_data_batch = np.concatenate([v.reshape(self.ep_step, -1) for v in list(data_batch.values())[:-1]], axis=-1)
+        redundant_rnn_hidden = data_batch['rnn_hidden']
+        return self.to_chunk(concat_data_batch, redundant_rnn_hidden)
 
-    def to_chunk(self, concat_data_batch):
+    def to_chunk(self, concat_data_batch, redundant_rnn_hidden=None):
         chunk_num = int(np.ceil(self.ep_step / self.chunk_len))
         target_len = chunk_num * self.chunk_len
         if len(concat_data_batch) < target_len:
@@ -113,7 +125,12 @@ class EnvWithMemory:
             concat_data_batch = np.pad(concat_data_batch, pad, 'constant', constant_values=0)
         concat_data_batch = concat_data_batch.reshape(self.chunk_len, chunk_num, *concat_data_batch.shape[1:])
         self.stored_chunk_num += chunk_num
-        return concat_data_batch
+        if redundant_rnn_hidden is not None:
+            indices = np.arange(chunk_num) * self.chunk_len
+            rnn_hidden = np.transpose(redundant_rnn_hidden[indices], (1, 0, 2))
+        else:
+            rnn_hidden = None
+        return concat_data_batch, rnn_hidden
 
     def compute_gae(self, bootstrap_value):
         reward = np.array(self.history['reward'], dtype=np.float32).squeeze(-1)
@@ -140,8 +157,15 @@ class VecEnvWithMemory:
         stacked_model_inputs = []
         for inp in zip(*model_inputs):
             stacked_model_inputs.append(np.stack(inp))
-        concat_storage_block = np.concatenate(storage_blocks, axis=1) if len(storage_blocks) > 0 else None
-        return concat_storage_block, infos, stacked_model_inputs
+        if len(storage_blocks) > 0:
+            blks, rnn_hiddens = zip(*storage_blocks)
+            concat_blk = np.concatenate(blks, axis=1)
+            if rnn_hiddens[0] is not None:
+                rnn_hiddens = np.concatenate(rnn_hiddens, axis=1)
+            storage_blocks = (concat_blk, rnn_hiddens)
+        else:
+            storage_blocks = None
+        return storage_blocks, infos, stacked_model_inputs
 
     def get_model_inputs(self):
         model_inputs = [env._get_model_input() for env in self.envs]
