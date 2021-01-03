@@ -1,6 +1,7 @@
 pkill -9 ray
-num_workers=(10)
-num_env=16
+num_workers=(9)
+num_postprocessors=3
+num_env=32
 group_name="shm_buf"
 job_name="shm_buf"
 num_frames=10000000
@@ -19,6 +20,7 @@ do
                             --gpu_id 0 \
                             --min_return_chunk_num 16 \
                             --q_size 8 \
-                            --batch_size 512
+                            --batch_size 512 \
+                            --num_postprocessors ${num_postprocessors}
     pkill -9 ray
 done

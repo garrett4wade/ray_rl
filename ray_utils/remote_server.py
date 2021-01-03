@@ -29,7 +29,7 @@ class EpisodeRecorder:
     def push(self, stat_list):
         if len(stat_list) == 0:
             return
-        stat_dict = {k: [x[k] for x in stat_list] for k in stat_list[0].keys()}
+        stat_dict = {k: [getattr(x, k) for x in stat_list] for k in stat_list[0]._fields}
         for k, v in stat_dict.items():
             if k not in self.storage.keys():
                 self.storage[k] = v

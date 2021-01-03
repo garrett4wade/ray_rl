@@ -59,6 +59,7 @@ parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode
 parser.add_argument('--min_return_chunk_num', type=int, default=64, help='minimal chunk number before env.collect')
 
 # Ray distributed training parameters
+parser.add_argument('--num_postprocessors', type=int, default=4, help='# of postprocessors')
 parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
 parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
@@ -157,7 +158,9 @@ if __name__ == "__main__":
     # initialize workers, who are responsible for interacting with env (simulation)
     ps = ParameterServer.remote(weights=init_weights)
     recorder = EpisodeRecorder.remote()
-    supervisor = SimulationSupervisor(model_fn=build_worker_model,
+    supervisor = SimulationSupervisor(rollout_keys=EnvWithMemory.ROLLOUT_KEYS,
+                                      collect_keys=EnvWithMemory.COLLECT_KEYS,
+                                      model_fn=build_worker_model,
                                       worker_env_fn=build_worker_env,
                                       ps=ps,
                                       recorder=recorder,
