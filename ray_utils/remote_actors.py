@@ -4,6 +4,7 @@ import threading
 from queue import Queue as ThreadSafeQueue
 from scipy.signal import lfilter
 import numpy as np
+import torch
 
 
 class RolloutWorker:
@@ -226,20 +227,21 @@ class RolloutCollector:
 
 
 class BufferCollector(mp.Process):
-    def __init__(self, collector_id, buffer, shm_tensor_dict, available_flags, sample_ready):
+    def __init__(self, collector_id, buffer, shm_tensor_dict, available_flag, sample_ready):
         super().__init__()
         self.daemon = True
         self.id = collector_id
         self.buffer = buffer
         self.shm_tensor_dict = shm_tensor_dict
-        self.available_flags = available_flags
+        self.available_flag = available_flag
         self.sample_ready = sample_ready
 
     def run(self):
         while True:
-            if self.available_flags[self.id] == 0:
-                self.buffer.get(self.shm_tensor_dict)
-                self.available_flags[self.id] = 1
+            try:
                 self.sample_ready.acquire()
-                self.sample_ready.notify(1)
+                self.sample_ready.wait_for(lambda: self.available_flag == 0)
+                self.buffer.get(self.shm_tensor_dict)
+                self.available_flag.copy_(torch.ones(1))
+            finally:
                 self.sample_ready.release()

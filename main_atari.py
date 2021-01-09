@@ -189,10 +189,10 @@ if __name__ == "__main__":
     ]
     for td in shm_tensor_dicts:
         td['rnn_hidden'] = torch.zeros(1, config.batch_size, config.hidden_dim * 2).share_memory_()
-    available_flags = torch.zeros(config.num_collectors, dtype=torch.uint8).share_memory_()
-    sample_ready = mp.Condition(mp.Lock())
+    available_flags = [torch.zeros(1, dtype=torch.uint8).share_memory_() for _ in range(config.num_collectors)]
+    sample_readies = [mp.Condition(mp.Lock()) for _ in range(config.num_collectors)]
     buffer_collectors = [
-        BufferCollector(i, buffer, shm_tensor_dicts[i], available_flags, sample_ready)
+        BufferCollector(i, buffer, shm_tensor_dicts[i], available_flags[i], sample_readies[i])
         for i in range(kwargs['num_collectors'])
     ]
     for collector in buffer_collectors:
@@ -204,21 +204,15 @@ if __name__ == "__main__":
     # main loop
     global_step = 0
     num_frames = 0
+    coll_cnt = 0
     while num_frames < kwargs['total_frames']:
         '''
             sample from buffer
         '''
         iter_start = time.time()
         # wait until there's enough data in buffer
-        try:
-            sample_ready.acquire()
-            sample_ready.wait_for(lambda: torch.any(available_flags))
-            sample_ready_idx = 0
-            while not available_flags[sample_ready_idx]:
-                sample_ready_idx += 1
-            available_flags[sample_ready_idx] = 0
-        finally:
-            sample_ready.release()
+        while not available_flags[coll_cnt]:
+            coll_cnt = (coll_cnt + 1) % config.num_collectors
         sample_time = time.time() - iter_start
 
         if ray_proc is None and config.record_mem:
@@ -233,8 +227,16 @@ if __name__ == "__main__":
         start = time.time()
         # convert numpy array to tensor and send them to desired device
         data_batch = {}
-        for k, v in shm_tensor_dicts[sample_ready_idx].items():
+        for k, v in shm_tensor_dicts[coll_cnt].items():
             data_batch[k] = v.to(**learner.tpdv)
+        try:
+            sample_readies[coll_cnt].acquire()
+            available_flags[coll_cnt].copy_(torch.zeros(1))
+            sample_readies[coll_cnt].notify(1)
+        finally:
+            sample_readies[coll_cnt].release()
+        coll_cnt = (coll_cnt + 1) % config.num_collectors
+        # print(data_batch['adv'])
         load_gpu_time = time.time() - start
         # train learner
         loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)

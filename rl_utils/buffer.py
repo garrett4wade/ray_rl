@@ -143,7 +143,7 @@ class SharedCircularBuffer:
         self.simplex_shapes = get_simplex_shapes(shapes)
         left = [sum(self.simplex_shapes[:i]) for i in range(len(self.simplex_shapes))]
         right = [sum(self.simplex_shapes[:i]) for i in range(1, len(self.simplex_shapes) + 1)]
-        self.slices = map(lambda x: slice(*x), zip(left, right))
+        self.slices = list(map(lambda x: slice(*x), zip(left, right)))
 
         self._read_ready = Condition(Lock())
 
