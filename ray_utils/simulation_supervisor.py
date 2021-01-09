@@ -31,13 +31,14 @@ class SimulationSupervisor(mp.Process):
     def run(self):
         initialize_single_machine_ray_on_supervisor(self.id, self.kwargs)
         self.ps = ParameterServer.remote(self.weights)
-        self.rollout_collector = RolloutCollector(supervisor_id=self.id,
-                                                  rollout_keys=self.rollout_keys,
-                                                  collect_keys=self.collect_keys,
-                                                  model_fn=self.model_fn,
-                                                  worker_env_fn=self.worker_env_fn,
-                                                  ps=self.ps,
-                                                  kwargs=self.kwargs)
+        self.rollout_collector = RolloutCollector(
+            supervisor_id=self.id,
+            #   rollout_keys=self.rollout_keys,
+            #   collect_keys=self.collect_keys,
+            model_fn=self.model_fn,
+            worker_env_fn=self.worker_env_fn,
+            ps=self.ps,
+            kwargs=self.kwargs)
         self.sample_job = threading.Thread(target=self.sample_from_rollout_collector, daemon=True)
         self.put_jobs = [
             threading.Thread(target=self.put_sample_into_buffer, daemon=True) for _ in range(self.kwargs['num_writers'])
@@ -49,17 +50,6 @@ class SimulationSupervisor(mp.Process):
             pjob.start()
         for pjob in self.put_jobs:
             pjob.join()
-
-        # upload_job = []
-        # while True:
-        #     if self.weights_available[self.id]:
-        #         ray.get(upload_job)
-        #         upload_job = self.ps.set_weights.remote(deepcopy(self.weights))
-        #         self.weights_available[self.id].copy_(torch.tensor(0))
-        #     ready_sample_id = self.rollout_collector.get_sample_ids()
-        #     storage_block, infos = ray.get(ready_sample_id)
-        #     self.global_buffer.put(*storage_block)
-        #     self.info_queue.put(infos)
 
     def sample_from_rollout_collector(self):
         while True:

@@ -9,7 +9,7 @@ num_frames=100000000
 seed=678446
 for num_worker in ${num_workers[@]}
 do
-    exp_name="1sup_breakout_"${num_env}"*"${num_worker}
+    exp_name="coupleGAE_breakout_"${num_env}"*"${num_worker}
     echo "current experiment ${exp_name}"
     python3.8 main_atari.py --exp_name ${exp_name} \
                             --wandb_group ${group_name} \
@@ -23,7 +23,8 @@ do
                             --batch_size 512 \
                             --num_postprocessors ${num_postprocessors} \
                             --num_writers 4 \
-                            --num_supervisors 1
+                            --num_supervisors 1 \
+                            --no_summary
     pkill -9 ray
     pkill -9 python3.8
 done
