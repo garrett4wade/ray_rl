@@ -57,12 +57,12 @@ class PostProcessor:
         assert kwargs['num_workers'] % kwargs['num_postprocessors'] == 0
         self.num_workers = kwargs['num_workers'] // kwargs['num_postprocessors']
         self.workers = [
-            ray.remote(num_cpus=kwargs['cpu_per_worker'])(RolloutWorker).remote(worker_id=i + kwargs['num_postprocessors'] * processor_id,
-                                                                                model_fn=model_fn,
-                                                                                worker_env_fn=worker_env_fn,
-                                                                                ps=ps,
-                                                                                kwargs=kwargs)
-            for i in range(self.num_workers)
+            ray.remote(num_cpus=kwargs['cpu_per_worker'])(RolloutWorker).remote(
+                worker_id=i + kwargs['num_postprocessors'] * processor_id,
+                model_fn=model_fn,
+                worker_env_fn=worker_env_fn,
+                ps=ps,
+                kwargs=kwargs) for i in range(self.num_workers)
         ]
         self.working_jobs = []
         # job_hashing maps job id to worker index
@@ -84,13 +84,16 @@ class PostProcessor:
         self.collect_keys = collect_keys
 
     def collect_traj(self):
+        # import time
         # iteratively make worker active
         for i in range(self.num_workers):
             job = self.workers[i].get.remote()
             self.working_jobs.append(job)
             self.job_hashing[job] = i
         while True:
+            # start = time.time()
             [ready_job], self.working_jobs = ray.wait(self.working_jobs, num_returns=1)
+            # print('postprocessor wait time: {}ms'.format(1e3 * (time.time() - start)))
 
             worker_id = self.job_hashing[ready_job]
             self.job_hashing.pop(ready_job)
@@ -136,7 +139,7 @@ class PostProcessor:
                 self.stored_concat_datas = []
                 self.stored_infos = []
                 self.stored_chunk_num = 0
-    
+
     def to_chunk(self, storage_block, redundant_rnn_hidden=None):
         chunk_num = int(np.ceil(len(storage_block) / self.chunk_len))
         target_len = chunk_num * self.chunk_len
@@ -160,23 +163,22 @@ class PostProcessor:
         td_err = n_step_v - value.squeeze(-1)
         adv = lfilter([1], [1, -self.lmbda], td_err[::-1])[::-1]
         return np.expand_dims(n_step_v, 1), np.expand_dims(adv, 1)
-    
+
     def get(self):
         return next(self._generator)
 
 
 class RolloutCollector:
-    def __init__(self, rollout_keys, collect_keys, model_fn, worker_env_fn, ps, kwargs):
-        self.num_postprocessors = kwargs['num_postprocessors']
+    def __init__(self, supervisor_id, rollout_keys, collect_keys, model_fn, worker_env_fn, ps, kwargs):
+        self.num_postprocessors = kwargs['num_postprocessors'] // kwargs['num_supervisors']
         self.postprocessors = [
-            ray.remote(num_cpus=1)(PostProcessor).remote(processor_id=i,
-                                                        rollout_keys=rollout_keys,
-                                                        collect_keys=collect_keys,
-                                                        model_fn=model_fn,
-                                                        worker_env_fn=worker_env_fn,
-                                                        ps=ps,
-                                                        kwargs=kwargs)
-            for i in range(self.num_postprocessors)
+            ray.remote(num_cpus=1)(PostProcessor).remote(processor_id=i + supervisor_id * kwargs['num_supervisors'],
+                                                         rollout_keys=rollout_keys,
+                                                         collect_keys=collect_keys,
+                                                         model_fn=model_fn,
+                                                         worker_env_fn=worker_env_fn,
+                                                         ps=ps,
+                                                         kwargs=kwargs) for i in range(self.num_postprocessors)
         ]
         self.working_jobs = []
         # job_hashing maps job id to worker index
@@ -222,43 +224,6 @@ class RolloutCollector:
 #         while True:
 #             blk = self.ready_queue.get()
 #             self.buffer.put(blk)
-
-
-class SimulationSupervisor:
-    def __init__(self, rollout_keys, collect_keys, model_fn, worker_env_fn, ps, recorder, global_buffer, kwargs):
-        self.rollout_collector = RolloutCollector(rollout_keys=rollout_keys, collect_keys=collect_keys, model_fn=model_fn, worker_env_fn=worker_env_fn, ps=ps, kwargs=kwargs)
-        self.global_buffer = global_buffer
-        self.recorder = recorder
-        self.ready_id_queue = ThreadSafeQueue(maxsize=128)
-
-        self.sample_job = threading.Thread(target=self.sample_from_rollout_collector, daemon=True)
-        self.put_jobs = [
-            threading.Thread(target=self.put_sample_into_buffer, daemon=True) for _ in range(kwargs['num_writers'])
-        ]
-
-    def start(self):
-        self.sample_job.start()
-        for job in self.put_jobs:
-            job.start()
-
-    def sample_from_rollout_collector(self):
-        self.record_job = []
-        while True:
-            ready_sample_id = self.rollout_collector.get_sample_ids()
-            self.ready_id_queue.put(ready_sample_id)
-
-    # TODO: i/o bound, may use asyncio?
-    def put_sample_into_buffer(self):
-        self.record_job = []
-        while True:
-            ready_sample_id = self.ready_id_queue.get()
-            storage_block, infos = ray.get(ready_sample_id)
-            self.global_buffer.put(*storage_block)
-            ray.get(self.record_job)
-            self.record_job = self.recorder.push.remote(infos)
-
-    def get_ready_queue_util(self):
-        return self.ready_id_queue.qsize() / 128
 
 
 class BufferCollector(mp.Process):

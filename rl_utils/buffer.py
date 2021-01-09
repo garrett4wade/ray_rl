@@ -124,7 +124,15 @@ class CircularBufferNumpy:
 
 
 class SharedCircularBuffer:
-    def __init__(self, maxsize, chunk_len, reuse_times, shapes, produced_batch_size, num_collectors, use_rnn=False, rnn_hidden_shape=None):
+    def __init__(self,
+                 maxsize,
+                 chunk_len,
+                 reuse_times,
+                 shapes,
+                 produced_batch_size,
+                 num_collectors,
+                 use_rnn=False,
+                 rnn_hidden_shape=None):
         self.reuse_times = reuse_times
         self.maxsize = maxsize
         self.chunk_len = chunk_len
@@ -141,14 +149,16 @@ class SharedCircularBuffer:
 
         self._storage_shm = self._smm.SharedMemory(size=4 * maxsize * chunk_len * sum(self.simplex_shapes))
         self.storage = np.ndarray((chunk_len, maxsize, sum(self.simplex_shapes)),
-                                   dtype=np.float32,
-                                   buffer=self._storage_shm.buf)
-        
+                                  dtype=np.float32,
+                                  buffer=self._storage_shm.buf)
+
         self.use_rnn = use_rnn
         if use_rnn:
             self.rnn_hiddep_shape = rnn_hidden_shape
             self._rnn_hidden_shm = self._smm.SharedMemory(size=4 * maxsize * np.prod(rnn_hidden_shape))
-            self.rnn_storage = np.ndarray((rnn_hidden_shape[0], maxsize, rnn_hidden_shape[1]), dtype=np.float32, buffer=self._rnn_hidden_shm.buf)
+            self.rnn_storage = np.ndarray((rnn_hidden_shape[0], maxsize, rnn_hidden_shape[1]),
+                                          dtype=np.float32,
+                                          buffer=self._rnn_hidden_shm.buf)
 
         self._used_times_shm = self._smm.SharedMemory(size=maxsize)
         self.used_times = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._used_times_shm.buf)
@@ -225,7 +235,10 @@ class SharedCircularBuffer:
 
         # assert np.all(self.is_ready + self.is_busy + self.is_free)
         self._read_ready.release()
-        data_dict = {k: v.reshape(self.chunk_len, self.produced_batch_size, *shp) for k, v, shp in zip(self.shapes.keys(), np.split(data_batch, self.split, axis=-1), self.shapes.values())}
+        data_dict = {
+            k: v.reshape(self.chunk_len, self.produced_batch_size, *shp)
+            for k, v, shp in zip(self.shapes.keys(), np.split(data_batch, self.split, axis=-1), self.shapes.values())
+        }
         if self.use_rnn:
             data_dict['rnn_hidden'] = rnn_hidden_batch
         return data_dict

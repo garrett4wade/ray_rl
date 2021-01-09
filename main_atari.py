@@ -14,13 +14,13 @@ import os
 import psutil
 from pgrep import pgrep
 
-from env.atari.env_with_memory import EnvWithMemory, VecEnvWithMemory
+from env.atari.env_with_memory import EnvWithMemory, VecEnvWithMemory, ROLLOUT_KEYS, COLLECT_KEYS
 from env.atari.model.rec_model import ActorCritic
 from env.atari.wrappers import WarpFrame, FrameStack
 from rl_utils.buffer import SharedCircularBuffer
-from ray_utils.remote_server import ParameterServer, EpisodeRecorder
-from ray_utils.remote_actors import SimulationSupervisor, BufferCollector  # , GPULoader
-from ray_utils.init_ray import initialize_single_machine_ray
+from ray_utils.remote_actors import BufferCollector  # , GPULoader
+from ray_utils.simulation_supervisor import SimulationSupervisor
+from ray_utils.recorder import EpisodeRecorder
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
@@ -59,6 +59,7 @@ parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode
 parser.add_argument('--min_return_chunk_num', type=int, default=64, help='minimal chunk number before env.collect')
 
 # Ray distributed training parameters
+parser.add_argument('--num_supervisors', type=int, default=4, help='# of postprocessors')
 parser.add_argument('--num_postprocessors', type=int, default=4, help='# of postprocessors')
 parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
 parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
@@ -142,33 +143,42 @@ if __name__ == "__main__":
                          config=kwargs)
         config = wandb.config
 
-    initialize_single_machine_ray(config)
-
     # initialize learner, who is responsible for gradient update
     learner = build_learner_model(kwargs)
     optimizer = optim.Adam(learner.parameters(), lr=config.lr)
-    init_weights = learner.get_weights()
+    global_weights = learner.get_weights()
+    for v in global_weights.values():
+        v.share_memory_()
+    weights_available = torch.ones(config.num_supervisors).share_memory_()
+
+    # to collect rollout infos from remote workers
+    info_queue = mp.Queue(maxsize=config.num_workers * config.env_num)
+    recorder = EpisodeRecorder(info_queue)
+    recorder.start()
 
     # initialize buffer
     buffer_maxsize = config.batch_size * config.q_size
-    buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times, 
-                                  EnvWithMemory.get_shapes(kwargs), config.batch_size, 
-                                  config.num_collectors, True, EnvWithMemory.get_rnn_hidden_shape(kwargs))
+    buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times,
+                                  EnvWithMemory.get_shapes(kwargs), config.batch_size, config.num_collectors, True,
+                                  EnvWithMemory.get_rnn_hidden_shape(kwargs))
 
     # initialize workers, who are responsible for interacting with env (simulation)
-    ps = ParameterServer.remote(weights=init_weights)
-    recorder = EpisodeRecorder.remote()
-    supervisor = SimulationSupervisor(rollout_keys=EnvWithMemory.ROLLOUT_KEYS,
-                                      collect_keys=EnvWithMemory.COLLECT_KEYS,
-                                      model_fn=build_worker_model,
-                                      worker_env_fn=build_worker_env,
-                                      ps=ps,
-                                      recorder=recorder,
-                                      global_buffer=buffer,
-                                      kwargs=kwargs)
+    supervisors = [
+        SimulationSupervisor(supervisor_id=i,
+                             rollout_keys=ROLLOUT_KEYS,
+                             collect_keys=COLLECT_KEYS,
+                             model_fn=build_worker_model,
+                             worker_env_fn=build_worker_env,
+                             global_buffer=buffer,
+                             weights=global_weights,
+                             weights_available=weights_available,
+                             info_queue=info_queue,
+                             kwargs=kwargs) for i in range(config.num_supervisors)
+    ]
     # after starting simulation thread, workers asynchronously interact with
     # environments and send data into buffer via Ray backbone
-    supervisor.start()
+    for supervisor in supervisors:
+        supervisor.start()
 
     shm_tensor_dicts = [
         dict(
@@ -205,28 +215,27 @@ if __name__ == "__main__":
             buffer_collector_cnt = (buffer_collector_cnt + 1) % config.num_collectors
         try:
             readies[buffer_collector_cnt].acquire()
-            data_batch = shm_tensor_dicts[buffer_collector_cnt].copy()
             available_flags[buffer_collector_cnt].copy_(torch.zeros(1))
             readies[buffer_collector_cnt].notify()
         finally:
             readies[buffer_collector_cnt].release()
-            buffer_collector_cnt = (buffer_collector_cnt + 1) % config.num_collectors
         sample_time = time.time() - iter_start
 
         if ray_proc is None and config.record_mem:
             ray_proc = {k: [psutil.Process(pid) for pid in pgrep(k)] for k in ray_proc_name}
 
         # pull from remote return recorder
-        return_stat_job = recorder.pull.remote()
-        num_frames += torch.sum(data_batch['pad_mask']).item()
+        num_frames += int(config.chunk_len * config.batch_size)
         global_step += 1
         '''
             update !
         '''
         start = time.time()
         # convert numpy array to tensor and send them to desired device
-        for k, v in data_batch.items():
+        data_batch = {}
+        for k, v in shm_tensor_dicts[buffer_collector_cnt].items():
             data_batch[k] = v.to(**learner.tpdv)
+        buffer_collector_cnt = (buffer_collector_cnt + 1) % config.num_collectors
         load_gpu_time = time.time() - start
         # train learner
         loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)
@@ -234,13 +243,17 @@ if __name__ == "__main__":
 
         # upload updated learner parameter to parameter server
         if global_step % config.push_period == 0:
-            push_job = ps.set_weights.remote(learner.get_weights())
-            ray.get(push_job)
-            del push_job
-
-        return_record = ray.get(return_stat_job)
+            new_weights = learner.get_weights()
+            for k, v in new_weights.items():
+                global_weights[k].copy_(v)
+            for v in global_weights.values():
+                assert v.is_shared()
+            weights_available.copy_(torch.ones(config.num_supervisors))
+            assert weights_available.is_shared()
 
         dur = time.time() - iter_start
+
+        return_record = recorder.pull()
         print("----------------------------------------------")
         print(("Global Step: {}, Frames: {}, " + "Average Return: {:.2f}, " + "Sample Time: {:.2f}s, " +
                "Optimization Time: {:.2f}s, " + "Iteration Step Time: {:.2f}s").format(
@@ -283,16 +296,20 @@ if __name__ == "__main__":
             'buffer/utilization': buffer.get_util(),
             'buffer/received_sample': buffer.get_received_sample(),
             'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
-            'buffer/ready_id_queue_util': supervisor.get_ready_queue_util(),
+            'buffer/ready_id_queue_util': np.mean([supervisor.get_ready_queue_util() for supervisor in supervisors]),
             **ray_mem_info,
             **main_mem_info,
         }
 
         if not args.no_summary:
             # write summary into weights&biases
-            wandb.log({**return_stat, **loss_stat, **time_stat, **memory_stat}, step=num_frames)
+            wandb.log({
+                **return_stat,
+                **loss_stat,
+                **time_stat,
+                **memory_stat,
+            }, step=num_frames)
 
-        del return_stat_job, return_record
     if not args.no_summary:
         run.finish()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))

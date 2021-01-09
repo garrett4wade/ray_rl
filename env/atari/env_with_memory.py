@@ -1,16 +1,16 @@
 import numpy as np
 from collections import OrderedDict, namedtuple
 
+# NOTE: rnn_hidden must be the last one in keys
+ROLLOUT_KEYS = ['obs', 'action', 'action_logits', 'value', 'reward', 'pad_mask', 'rnn_hidden']
+COLLECT_KEYS = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target', 'pad_mask', 'rnn_hidden']
+assert 'rnn_hidden' not in ROLLOUT_KEYS or 'rnn_hidden' == ROLLOUT_KEYS[-1]
+assert 'rnn_hidden' not in COLLECT_KEYS or 'rnn_hidden' == COLLECT_KEYS[-1]
+Seg = namedtuple('Seg', ROLLOUT_KEYS)
+Info = namedtuple('Info', ['ep_return'])
+
 
 class EnvWithMemory:
-    # NOTE: rnn_hidden must be the last one in keys
-    ROLLOUT_KEYS = ['obs', 'action', 'action_logits', 'value', 'reward', 'pad_mask', 'rnn_hidden']
-    COLLECT_KEYS = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target', 'pad_mask', 'rnn_hidden']
-    assert 'rnn_hidden' not in ROLLOUT_KEYS or 'rnn_hidden' == ROLLOUT_KEYS[-1]
-    assert 'rnn_hidden' not in COLLECT_KEYS or 'rnn_hidden' == COLLECT_KEYS[-1]
-    Seg = namedtuple('Seg', ROLLOUT_KEYS)
-    Info = namedtuple('Info', ['ep_return'])
-
     def get_shapes(kwargs):
         return {
             'obs': kwargs['obs_dim'],
@@ -21,7 +21,7 @@ class EnvWithMemory:
             'value_target': (1, ),
             'pad_mask': (1, ),
         }
-    
+
     def get_rnn_hidden_shape(kwargs):
         return (1, kwargs['hidden_dim'] * 2)
 
@@ -67,8 +67,8 @@ class EnvWithMemory:
         if self.done:
             # if env is done in the previous step, use bootstrap value
             # to compute gae and collect history data
-            self.history_ep_datas.append((EnvWithMemory.Seg(**{k: np.stack(v) for k, v in self.history.items()}), value))
-            self.history_ep_infos.append(EnvWithMemory.Info(ep_return=self.ep_return))
+            self.history_ep_datas.append((Seg(**{k: np.stack(v) for k, v in self.history.items()}), value))
+            self.history_ep_infos.append(Info(ep_return=self.ep_return))
             self.stored_chunk_num += np.ceil(self.ep_step / self.chunk_len)
             self.reset()
             if self.stored_chunk_num >= self.min_return_chunk_num:
@@ -102,7 +102,7 @@ class EnvWithMemory:
 
     def reset_history(self):
         self.history = OrderedDict({})
-        for k in EnvWithMemory.ROLLOUT_KEYS:
+        for k in ROLLOUT_KEYS:
             self.history[k] = []
 
 
