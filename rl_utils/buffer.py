@@ -1,5 +1,6 @@
 import numpy as np
 import random
+from torch import from_numpy
 from rl_utils.utils import get_simplex_shapes
 from multiprocessing.managers import SharedMemoryManager
 from multiprocessing import Lock, Condition
@@ -140,7 +141,9 @@ class SharedCircularBuffer:
         self.num_collectors = num_collectors
         self.shapes = shapes
         self.simplex_shapes = get_simplex_shapes(shapes)
-        self.split = [sum(self.simplex_shapes[:i]) for i in range(1, len(self.simplex_shapes))]
+        left = [sum(self.simplex_shapes[:i]) for i in range(len(self.simplex_shapes))]
+        right = [sum(self.simplex_shapes[:i]) for i in range(1, len(self.simplex_shapes) + 1)]
+        self.slices = map(lambda x: slice(*x), zip(left, right))
 
         self._read_ready = Condition(Lock())
 
@@ -217,14 +220,18 @@ class SharedCircularBuffer:
         finally:
             self._read_ready.release()
 
-    def get(self):
+    def get(self, target_shm_tensor_dict):
         self._read_ready.acquire()
         self._read_ready.wait_for(lambda: np.sum(self.is_ready) >= self.produced_batch_size)
 
         indices = np.nonzero(self.is_ready)[0][:self.produced_batch_size]
-        data_batch = self.storage[:, indices].copy()
+        data_batch = self.storage[:, indices]
+        for k, s, shp in zip(self.shapes.keys(), self.slices, self.shapes.values()):
+            np_data = data_batch[:, :, s].reshape(self.chunk_len, self.produced_batch_size, *shp)
+            target_shm_tensor_dict[k].copy_(from_numpy(np_data))
         if self.use_rnn:
-            rnn_hidden_batch = self.rnn_storage[:, indices].copy()
+            rnn_hidden_batch = self.rnn_storage[:, indices]
+            target_shm_tensor_dict['rnn_hidden'].copy_(from_numpy(rnn_hidden_batch))
 
         # for used-up samples, is_ready -> is_free
         self.used_times[indices] += 1
@@ -235,13 +242,6 @@ class SharedCircularBuffer:
 
         # assert np.all(self.is_ready + self.is_busy + self.is_free)
         self._read_ready.release()
-        data_dict = {
-            k: v.reshape(self.chunk_len, self.produced_batch_size, *shp)
-            for k, v, shp in zip(self.shapes.keys(), np.split(data_batch, self.split, axis=-1), self.shapes.values())
-        }
-        if self.use_rnn:
-            data_dict['rnn_hidden'] = rnn_hidden_batch
-        return data_dict
 
     def get_util(self):
         return self.size() / self.maxsize
