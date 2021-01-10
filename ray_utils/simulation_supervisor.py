@@ -59,8 +59,9 @@ class SimulationSupervisor(mp.Process):
     def put_sample_into_buffer(self):
         while True:
             ready_sample_id = self.ready_id_queue.get()
-            storage_block, infos = ray.get(ready_sample_id)
-            self.global_buffer.put(*storage_block)
+            segs, infos = ray.get(ready_sample_id)
+            for seg in segs:
+                self.global_buffer.put(seg)
             self.info_queue.put(infos)
 
     def upload_weights(self):

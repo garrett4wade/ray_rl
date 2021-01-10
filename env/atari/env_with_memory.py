@@ -7,28 +7,26 @@ ROLLOUT_KEYS = ['obs', 'action', 'action_logits', 'value', 'reward', 'pad_mask',
 COLLECT_KEYS = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target', 'pad_mask', 'rnn_hidden']
 assert 'rnn_hidden' not in ROLLOUT_KEYS or 'rnn_hidden' == ROLLOUT_KEYS[-1]
 assert 'rnn_hidden' not in COLLECT_KEYS or 'rnn_hidden' == COLLECT_KEYS[-1]
-Seg = namedtuple('Seg', ROLLOUT_KEYS)
+Seg = namedtuple('Seg', COLLECT_KEYS)
 Info = namedtuple('Info', ['ep_return'])
 
 
 class EnvWithMemory:
     def get_shapes(kwargs):
-        return {
+        return OrderedDict({
             'obs': kwargs['obs_dim'],
-            'action': (1, ),
+            'action': (),
             'action_logits': (kwargs['action_dim'], ),
-            'value': (1, ),
-            'adv': (1, ),
-            'value_target': (1, ),
-            'pad_mask': (1, ),
-        }
-
-    def get_rnn_hidden_shape(kwargs):
-        return (1, kwargs['hidden_dim'] * 2)
+            'value': (),
+            'adv': (),
+            'value_target': (),
+            'pad_mask': (),
+            'rnn_hidden': (1, kwargs['hidden_dim'] * 2),
+        })
 
     def __init__(self, env_fn, kwargs):
         self.env = env_fn(kwargs)
-        self.rnn_hidden_shape = EnvWithMemory.get_rnn_hidden_shape(kwargs)
+        self.shapes = EnvWithMemory.get_shapes(kwargs)
 
         self.stored_chunk_num = 0
         self.history_ep_datas = []
@@ -53,7 +51,7 @@ class EnvWithMemory:
         return self.obs, self.rnn_hidden
 
     def _init_rnn_hidden(self):
-        return np.zeros(self.rnn_hidden_shape, dtype=np.float32)
+        return np.zeros(self.shapes['rnn_hidden'], dtype=np.float32)
 
     def reset(self):
         if self.verbose and self.done:
@@ -68,15 +66,15 @@ class EnvWithMemory:
         if self.done:
             # if env is done in the previous step, use bootstrap value
             # to compute gae and collect history data
-            import time
-            start = time.time()
+            # import time
+            # start = time.time()
             self.history_ep_datas.append(self.collect(value))
-            print("collect time: {}".format(1e3*(time.time() - start)))
+            # print("collect time: {}".format(1e3 * (time.time() - start)))
             self.history_ep_infos.append(Info(ep_return=self.ep_return))
             self.reset()
             if self.stored_chunk_num >= self.min_return_chunk_num:
-                datas = self.history_ep_datas
-                infos = self.history_ep_infos
+                datas = self.history_ep_datas.copy()
+                infos = self.history_ep_infos.copy()
                 self.history_ep_datas = []
                 self.history_ep_infos = []
                 self.stored_chunk_num = 0
@@ -93,10 +91,10 @@ class EnvWithMemory:
         self.history['obs'].append(self.obs)
         self.history['action'].append(action)
         self.history['action_logits'].append(action_logits)
-        self.history['reward'].append(np.array([r], dtype=np.float32))
+        self.history['reward'].append(r)
         self.history['value'].append(value)
         self.history['rnn_hidden'].append(self.rnn_hidden)
-        self.history['pad_mask'].append(np.array([1 - self.done], dtype=np.float32))
+        self.history['pad_mask'].append(1 - self.done)
 
         self.obs = n_obs
         self.rnn_hidden = rnn_hidden
@@ -118,35 +116,33 @@ class EnvWithMemory:
                 data_batch[k] = v_target
             elif k == 'adv':
                 data_batch[k] = adv
-        concat_data_batch = np.concatenate([v.reshape(self.ep_step, -1) for v in list(data_batch.values())[:-1]],
-                                           axis=-1)
-        redundant_rnn_hidden = data_batch['rnn_hidden']
-        return self.to_chunk(concat_data_batch, redundant_rnn_hidden)
+        return self.to_chunk(data_batch)
 
-    def to_chunk(self, concat_data_batch, redundant_rnn_hidden=None):
+    def to_chunk(self, data_batch):
         chunk_num = int(np.ceil(self.ep_step / self.chunk_len))
         target_len = chunk_num * self.chunk_len
-        if len(concat_data_batch) < target_len:
-            pad = tuple([(0, target_len - len(concat_data_batch))] + [(0, 0)] * (concat_data_batch.ndim - 1))
-            concat_data_batch = np.pad(concat_data_batch, pad, 'constant', constant_values=0)
-        concat_data_batch = concat_data_batch.reshape(self.chunk_len, chunk_num, *concat_data_batch.shape[1:])
+        chunks = {}
+        for k, v in data_batch.items():
+            if 'rnn_hidden' in k:
+                indices = np.arange(chunk_num) * self.chunk_len
+                chunks[k] = np.transpose(v[indices], (1, 0, 2))
+            else:
+                if len(v) < target_len:
+                    pad = tuple([(0, target_len - len(v))] + [(0, 0)] * (v.ndim - 1))
+                    pad_v = np.pad(v, pad, 'constant', constant_values=0)
+                else:
+                    pad_v = v
+                chunks[k] = pad_v.reshape(self.chunk_len, chunk_num, *v.shape[1:])
         self.stored_chunk_num += chunk_num
-        if redundant_rnn_hidden is not None:
-            indices = np.arange(chunk_num) * self.chunk_len
-            rnn_hidden = np.transpose(redundant_rnn_hidden[indices], (1, 0, 2))
-        else:
-            rnn_hidden = None
-        return concat_data_batch, rnn_hidden
+        return Seg(**chunks)
 
     def compute_gae(self, bootstrap_value):
-        reward = np.array(self.history['reward'], dtype=np.float32).squeeze(-1)
-        value = np.array(self.history['value'], dtype=np.float32).squeeze(-1)
-        discounted_r = lfilter([1], [1, -self.gamma], reward[::-1])[::-1]
+        discounted_r = lfilter([1], [1, -self.gamma], self.history['reward'][::-1])[::-1]
         discount_factor = self.gamma**np.arange(self.ep_step, 0, -1)
         n_step_v = discounted_r + bootstrap_value * discount_factor
-        td_err = n_step_v - value
+        td_err = n_step_v - np.array(self.history['value'], dtype=np.float32)
         adv = lfilter([1], [1, -self.lmbda], td_err[::-1])[::-1]
-        return np.expand_dims(n_step_v, 1), np.expand_dims(adv, 1)
+        return n_step_v, adv
 
 
 class VecEnvWithMemory:
@@ -163,14 +159,6 @@ class VecEnvWithMemory:
         stacked_model_inputs = []
         for inp in zip(*model_inputs):
             stacked_model_inputs.append(np.stack(inp))
-        if len(datas) > 0:
-            blks, rnn_hiddens = zip(*datas)
-            concat_blk = np.concatenate(blks, axis=1)
-            if rnn_hiddens[0] is not None:
-                rnn_hiddens = np.concatenate(rnn_hiddens, axis=1)
-            datas = (concat_blk, rnn_hiddens)
-        else:
-            datas = None
         return datas, infos, stacked_model_inputs
 
     def get_model_inputs(self):

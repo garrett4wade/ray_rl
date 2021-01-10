@@ -40,7 +40,7 @@ class RolloutWorker:
         while True:
             model_outputs = self.model.select_action(*model_inputs)
             datas, infos, model_inputs = self.env.step(*model_outputs)
-            if datas is None or len(infos) == 0:
+            if len(datas) == 0 or len(infos) == 0:
                 continue
             yield datas, infos
             # get new weights only when at least one of vectorized envs is done
@@ -203,6 +203,7 @@ class RolloutCollector:
         # iteratively make worker active
         self._start()
         while True:
+            print("start waiting...")
             [ready_job], self.working_jobs = ray.wait(self.working_jobs, num_returns=1)
 
             worker_id = self.job_hashing[ready_job]

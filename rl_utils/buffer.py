@@ -1,7 +1,6 @@
 import numpy as np
 import random
 from torch import from_numpy
-from rl_utils.utils import get_simplex_shapes
 from multiprocessing.managers import SharedMemoryManager
 from multiprocessing import Lock, Condition
 
@@ -125,43 +124,28 @@ class CircularBufferNumpy:
 
 
 class SharedCircularBuffer:
-    def __init__(self,
-                 maxsize,
-                 chunk_len,
-                 reuse_times,
-                 shapes,
-                 produced_batch_size,
-                 num_collectors,
-                 use_rnn=False,
-                 rnn_hidden_shape=None):
+    def __init__(self, maxsize, chunk_len, reuse_times, shapes, produced_batch_size, num_collectors, seg_fn):
         self.reuse_times = reuse_times
         self.maxsize = maxsize
         self.chunk_len = chunk_len
         self.produced_batch_size = produced_batch_size
         self.num_collectors = num_collectors
         self.shapes = shapes
-        self.simplex_shapes = get_simplex_shapes(shapes)
-        left = [sum(self.simplex_shapes[:i]) for i in range(len(self.simplex_shapes))]
-        right = [sum(self.simplex_shapes[:i]) for i in range(1, len(self.simplex_shapes) + 1)]
-        self.slices = list(map(lambda x: slice(*x), zip(left, right)))
 
         self._read_ready = Condition(Lock())
 
         self._smm = SharedMemoryManager()
         self._smm.start()
+        storage = []
 
-        self._storage_shm = self._smm.SharedMemory(size=4 * maxsize * chunk_len * sum(self.simplex_shapes))
-        self.storage = np.ndarray((chunk_len, maxsize, sum(self.simplex_shapes)),
-                                  dtype=np.float32,
-                                  buffer=self._storage_shm.buf)
-
-        self.use_rnn = use_rnn
-        if use_rnn:
-            self.rnn_hiddep_shape = rnn_hidden_shape
-            self._rnn_hidden_shm = self._smm.SharedMemory(size=4 * maxsize * np.prod(rnn_hidden_shape))
-            self.rnn_storage = np.ndarray((rnn_hidden_shape[0], maxsize, rnn_hidden_shape[1]),
-                                          dtype=np.float32,
-                                          buffer=self._rnn_hidden_shm.buf)
+        for k, shp in shapes.items():
+            if 'rnn_hidden' not in k:
+                _storage_shm = self._smm.SharedMemory(size=4 * maxsize * chunk_len * np.prod(shp))
+                storage.append(np.ndarray((chunk_len, maxsize, *shp), dtype=np.float32, buffer=_storage_shm.buf))
+            else:
+                _storage_shm = self._smm.SharedMemory(size=4 * maxsize * np.prod(shp))
+                storage.append(np.ndarray((shp[0], maxsize, *shp[1:]), dtype=np.float32, buffer=_storage_shm.buf))
+        self.storage = seg_fn(*storage)
 
         self._used_times_shm = self._smm.SharedMemory(size=maxsize)
         self.used_times = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._used_times_shm.buf)
@@ -186,8 +170,8 @@ class SharedCircularBuffer:
     def __len__(self):
         return self.size()
 
-    def put(self, data_batch, rnn_hidden_batch=None):
-        batch_size = data_batch.shape[1]
+    def put(self, data_batch):
+        batch_size = data_batch[0].shape[1]
 
         self._read_ready.acquire()
         try:
@@ -204,9 +188,8 @@ class SharedCircularBuffer:
         finally:
             self._read_ready.release()
 
-        self.storage[:, indices] = data_batch.copy()
-        if self.use_rnn:
-            self.rnn_storage[:, indices] = rnn_hidden_batch.copy()
+        for k in data_batch._fields:
+            getattr(self.storage, k)[:, indices] = getattr(data_batch, k).copy()
         self.used_times[indices] = 0
 
         self._read_ready.acquire()
@@ -225,13 +208,8 @@ class SharedCircularBuffer:
         self._read_ready.wait_for(lambda: np.sum(self.is_ready) >= self.produced_batch_size)
 
         indices = np.nonzero(self.is_ready)[0][:self.produced_batch_size]
-        data_batch = self.storage[:, indices]
-        for k, s, shp in zip(self.shapes.keys(), self.slices, self.shapes.values()):
-            np_data = data_batch[:, :, s].reshape(self.chunk_len, self.produced_batch_size, *shp)
-            target_shm_tensor_dict[k].copy_(from_numpy(np_data))
-        if self.use_rnn:
-            rnn_hidden_batch = self.rnn_storage[:, indices]
-            target_shm_tensor_dict['rnn_hidden'].copy_(from_numpy(rnn_hidden_batch))
+        for k in self.storage._fields:
+            target_shm_tensor_dict[k].copy_(from_numpy(getattr(self.storage, k)[:, indices]))
 
         # for used-up samples, is_ready -> is_free
         self.used_times[indices] += 1

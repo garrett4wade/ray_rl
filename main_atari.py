@@ -14,7 +14,7 @@ import os
 import psutil
 from pgrep import pgrep
 
-from env.atari.env_with_memory import EnvWithMemory, VecEnvWithMemory, ROLLOUT_KEYS, COLLECT_KEYS
+from env.atari.env_with_memory import EnvWithMemory, VecEnvWithMemory, ROLLOUT_KEYS, COLLECT_KEYS, Seg
 from env.atari.model.rec_model import ActorCritic
 from env.atari.wrappers import WarpFrame, FrameStack
 from rl_utils.buffer import SharedCircularBuffer
@@ -159,8 +159,7 @@ if __name__ == "__main__":
     # initialize buffer
     buffer_maxsize = config.batch_size * config.q_size
     buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times,
-                                  EnvWithMemory.get_shapes(kwargs), config.batch_size, config.num_collectors, True,
-                                  EnvWithMemory.get_rnn_hidden_shape(kwargs))
+                                  EnvWithMemory.get_shapes(kwargs), config.batch_size, config.num_collectors, Seg)
 
     # initialize workers, who are responsible for interacting with env (simulation)
     supervisors = [

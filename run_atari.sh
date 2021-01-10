@@ -1,6 +1,6 @@
 pkill -9 ray
 pkill -9 python3.8
-num_workers=(32)
+num_workers=(10)
 num_postprocessors=4
 num_env=16
 group_name="shm_buf"
