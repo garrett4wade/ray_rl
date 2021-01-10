@@ -203,7 +203,6 @@ class RolloutCollector:
         # iteratively make worker active
         self._start()
         while True:
-            print("start waiting...")
             [ready_job], self.working_jobs = ray.wait(self.working_jobs, num_returns=1)
 
             worker_id = self.job_hashing[ready_job]

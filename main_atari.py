@@ -162,17 +162,20 @@ if __name__ == "__main__":
                                   EnvWithMemory.get_shapes(kwargs), config.batch_size, config.num_collectors, Seg)
 
     # initialize workers, who are responsible for interacting with env (simulation)
+    queue_utils = [torch.tensor(0.0).share_memory_() for _ in range(config.num_supervisors)]
     supervisors = [
-        SimulationSupervisor(supervisor_id=i,
-                             rollout_keys=ROLLOUT_KEYS,
-                             collect_keys=COLLECT_KEYS,
-                             model_fn=build_worker_model,
-                             worker_env_fn=build_worker_env,
-                             global_buffer=buffer,
-                             weights=global_weights,
-                             weights_available=weights_available,
-                             info_queue=info_queue,
-                             kwargs=kwargs) for i in range(config.num_supervisors)
+        SimulationSupervisor(
+            supervisor_id=i,
+            rollout_keys=ROLLOUT_KEYS,
+            collect_keys=COLLECT_KEYS,
+            model_fn=build_worker_model,
+            worker_env_fn=build_worker_env,
+            global_buffer=buffer,
+            weights=global_weights,
+            weights_available=weights_available,
+            info_queue=info_queue,
+            #  queue_util=queue_utils[i],
+            kwargs=kwargs) for i in range(config.num_supervisors)
     ]
     # after starting simulation thread, workers asynchronously interact with
     # environments and send data into buffer via Ray backbone
@@ -296,7 +299,7 @@ if __name__ == "__main__":
             'buffer/utilization': buffer.get_util(),
             'buffer/received_sample': buffer.get_received_sample(),
             'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
-            'buffer/ready_id_queue_util': np.mean([supervisor.get_ready_queue_util() for supervisor in supervisors]),
+            'buffer/ready_id_queue_util': np.mean([u.item() for u in queue_utils]),
             **ray_mem_info,
             **main_mem_info,
         }
