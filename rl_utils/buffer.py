@@ -136,6 +136,7 @@ class SharedCircularBuffer:
 
         self._smm = SharedMemoryManager()
         self._smm.start()
+        self._storage_shms = []
         storage = []
 
         for k, shp in shapes.items():
@@ -145,6 +146,7 @@ class SharedCircularBuffer:
             else:
                 _storage_shm = self._smm.SharedMemory(size=4 * maxsize * np.prod(shp))
                 storage.append(np.ndarray((shp[0], maxsize, *shp[1:]), dtype=np.float32, buffer=_storage_shm.buf))
+            self._storage_shms.append(_storage_shm)
         self.storage = seg_fn(*storage)
 
         self._used_times_shm = self._smm.SharedMemory(size=maxsize)

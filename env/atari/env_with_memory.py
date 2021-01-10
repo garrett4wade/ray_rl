@@ -66,10 +66,7 @@ class EnvWithMemory:
         if self.done:
             # if env is done in the previous step, use bootstrap value
             # to compute gae and collect history data
-            # import time
-            # start = time.time()
             self.history_ep_datas.append(self.collect(value))
-            # print("collect time: {}".format(1e3 * (time.time() - start)))
             self.history_ep_infos.append(Info(ep_return=self.ep_return))
             self.reset()
             if self.stored_chunk_num >= self.min_return_chunk_num:
