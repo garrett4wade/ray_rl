@@ -174,8 +174,9 @@ if __name__ == "__main__":
             weights=global_weights,
             weights_available=weights_available,
             info_queue=info_queue,
-            #  queue_util=queue_utils[i],
-            kwargs=kwargs) for i in range(config.num_supervisors)
+            queue_util=queue_utils[i],
+            kwargs=kwargs,
+        ) for i in range(config.num_supervisors)
     ]
     # after starting simulation thread, workers asynchronously interact with
     # environments and send data into buffer via Ray backbone

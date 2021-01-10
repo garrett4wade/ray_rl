@@ -11,7 +11,7 @@ from copy import deepcopy
 
 class SimulationSupervisor(mp.Process):
     def __init__(self, supervisor_id, rollout_keys, collect_keys, model_fn, worker_env_fn, global_buffer, weights,
-                 weights_available, info_queue, kwargs):
+                 weights_available, info_queue, queue_util, kwargs):
         super().__init__()
         assert kwargs['num_workers'] % kwargs['num_supervisors'] == 0
         assert kwargs['num_postprocessors'] % kwargs['num_supervisors'] == 0
@@ -24,6 +24,7 @@ class SimulationSupervisor(mp.Process):
         self.weights = weights
         self.weights_available = weights_available
         self.info_queue = info_queue
+        self.queue_util = queue_util
         self.kwargs = kwargs
 
         self.ready_id_queue = queue.Queue(maxsize=128)
@@ -39,17 +40,20 @@ class SimulationSupervisor(mp.Process):
             worker_env_fn=self.worker_env_fn,
             ps=self.ps,
             kwargs=self.kwargs)
-        self.sample_job = threading.Thread(target=self.sample_from_rollout_collector, daemon=True)
-        self.put_jobs = [
+        sample_job = threading.Thread(target=self.sample_from_rollout_collector, daemon=True)
+        sample_job.start()
+        put_jobs = [
             threading.Thread(target=self.put_sample_into_buffer, daemon=True) for _ in range(self.kwargs['num_writers'])
         ]
-        self.upload_job = threading.Thread(target=self.upload_weights, daemon=True)
-        self.upload_job.start()
-        self.sample_job.start()
-        for pjob in self.put_jobs:
-            pjob.start()
-        for pjob in self.put_jobs:
-            pjob.join()
+        for put_job in put_jobs:
+            put_job.start()
+        upload_job = []
+        while True:
+            if self.weights_available[self.id]:
+                ray.get(upload_job)
+                upload_job = self.ps.set_weights.remote(deepcopy(self.weights))
+                self.weights_available[self.id].copy_(torch.tensor(0))
+                self.queue_util.copy_(torch.tensor(self.ready_id_queue.qsize() / self.ready_id_queue.maxsize))
 
     def sample_from_rollout_collector(self):
         while True:
@@ -63,14 +67,3 @@ class SimulationSupervisor(mp.Process):
             for seg in segs:
                 self.global_buffer.put(seg)
             self.info_queue.put(infos)
-
-    def upload_weights(self):
-        job = []
-        while True:
-            if self.weights_available[self.id]:
-                ray.get(job)
-                job = self.ps.set_weights.remote(deepcopy(self.weights))
-                self.weights_available[self.id].copy_(torch.tensor(0))
-
-    def get_ready_queue_util(self):
-        return self.ready_id_queue.qsize() / 128
