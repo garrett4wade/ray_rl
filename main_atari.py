@@ -53,6 +53,7 @@ parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode
 parser.add_argument('--min_return_chunk_num', type=int, default=64, help='minimal chunk number before env.collect')
 
 # Ray distributed training parameters
+parser.add_argument('--ray_dashboard', action='store_true', help='use ray dashboard')
 parser.add_argument('--num_supervisors', type=int, default=1, help='# of postprocessors')
 parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
 parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')

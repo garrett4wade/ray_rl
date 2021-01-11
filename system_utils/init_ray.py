@@ -24,7 +24,12 @@ def initialize_single_machine_ray_on_supervisor(supervisor_id, kwargs):
     main_process_cpus = 1
     num_cpus = worker_cpus + ps_recorder_cpus + main_process_cpus  # + postprocessor_cpus
     # 1.5GB object store memory per worker, empirically can't use that much
+    dashboard_kwargs = {}
+    if kwargs['ray_dashboard']:
+        dashboard_kwargs['dashboard_port'] = int(8265 + supervisor_id)
+    else:
+        dashboard_kwargs['include_dashboard'] = False
     ray.init(num_cpus=num_cpus,
-             dashboard_port=8265 + supervisor_id,
-             object_store_memory=int(1.5 * 1024**3 * kwargs['num_workers'] // kwargs['num_supervisors']))
+             object_store_memory=int(1.5 * 1024**3 * kwargs['num_workers'] // kwargs['num_supervisors']),
+             **dashboard_kwargs)
     print("Ray utilized cpu number: {}".format(num_cpus))
