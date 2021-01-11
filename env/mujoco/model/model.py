@@ -46,7 +46,7 @@ class ActorCritic(nn.Module):
     def forward(self, state):
         x = self.core(state)
         action_logits = self.action_layer(x)
-        value = self.value_layer(x)
+        value = self.value_layer(x).squeeze(-1)
 
         mu, log_std = torch.split(action_logits, self.action_dim, dim=-1)
         log_std = log_std.clamp(LOG_STD_MIN, LOG_STD_MAX)
@@ -64,35 +64,33 @@ class ActorCritic(nn.Module):
         results = self(obs)
         return [result.numpy() for result in results]
 
-    def compute_loss(self, obs, action, action_logits, adv, value, value_target):
+    def compute_loss(self, obs, action, action_logits, adv, value, value_target, pad_mask):
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-        # to remove padding values
-        valid_mask = (value != 0.0).to(torch.float32)
         _, target_action_logits, cur_state_value = self(obs)
 
         target_mu, target_log_std = torch.split(target_action_logits, self.action_dim, dim=-1)
         target_mu = torch.tanh(target_mu) * self.action_scale + self.action_loc
         target_log_std = target_log_std.clamp(LOG_STD_MIN, LOG_STD_MAX)
         target_dist = Normal(target_mu, target_log_std.exp())
-        target_action_logprobs = target_dist.log_prob(action).sum(-1, keepdim=True)
+        target_action_logprobs = target_dist.log_prob(action).sum(-1)
 
         mu, log_std = torch.split(action_logits, self.action_dim, dim=-1)
         mu = torch.tanh(mu) * self.action_scale + self.action_loc
         log_std = log_std.clamp(LOG_STD_MIN, LOG_STD_MAX)
         behavior_dist = Normal(mu, log_std.exp())
-        behavior_action_logprobs = behavior_dist.log_prob(action).sum(-1, keepdim=True)
+        behavior_action_logprobs = behavior_dist.log_prob(action).sum(-1)
 
         log_rhos = target_action_logprobs - behavior_action_logprobs.detach()
         rhos = log_rhos.exp()
 
         p_surr = adv * torch.clamp(rhos, 1 - self.clip_ratio, 1 + self.clip_ratio)
-        p_loss = (-torch.min(p_surr, rhos * adv) * valid_mask).mean()
+        p_loss = (-torch.min(p_surr, rhos * adv) * pad_mask).mean()
 
         cur_v_clipped = value + torch.clamp(cur_state_value - value, -self.clip_ratio, self.clip_ratio)
         v_loss = torch.max(F.mse_loss(cur_state_value, value_target), F.mse_loss(cur_v_clipped, value_target))
-        v_loss = (v_loss * valid_mask).mean()
+        v_loss = (v_loss * pad_mask).mean()
 
-        entropy_loss = (-target_dist.entropy().sum(-1, keepdim=True) * valid_mask).mean()
+        entropy_loss = (-target_dist.entropy().sum(-1) * pad_mask).mean()
         return v_loss, p_loss, entropy_loss
 
     def get_weights(self):

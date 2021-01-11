@@ -1,5 +1,4 @@
 import gym
-import ray
 import time
 import wandb
 import argparse
@@ -30,7 +29,6 @@ parser.add_argument('--verbose', action='store_true')
 # environment
 parser.add_argument('--env_name', type=str, default='Breakout-v0', help='name of env')
 parser.add_argument('--env_num', type=int, default=2, help='# evironments per worker')
-parser.add_argument('--env_split', type=int, default=2, help='# splitted vectorized env copies per worker')
 parser.add_argument('--total_frames', type=int, default=int(100e6), help='optimization batch size')
 
 # important parameters of model and algorithm
@@ -54,8 +52,7 @@ parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode
 parser.add_argument('--min_return_chunk_num', type=int, default=64, help='minimal chunk number before env.collect')
 
 # Ray distributed training parameters
-parser.add_argument('--num_supervisors', type=int, default=4, help='# of postprocessors')
-parser.add_argument('--num_postprocessors', type=int, default=4, help='# of postprocessors')
+parser.add_argument('--num_supervisors', type=int, default=1, help='# of postprocessors')
 parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
 parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
@@ -279,4 +276,3 @@ if __name__ == "__main__":
     if not args.no_summary:
         run.finish()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
-    ray.shutdown()

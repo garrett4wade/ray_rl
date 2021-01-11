@@ -1,5 +1,4 @@
 import gym
-import ray
 import time
 import wandb
 import argparse
@@ -8,18 +7,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-
-import os
-import psutil
-from pgrep import pgrep
 import multiprocessing as mp
 
 from env.mujoco.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from env.mujoco.model.model import ActorCritic
+from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, Seg, Info
 from rl_utils.buffer import SharedCircularBuffer
-from ray_utils.remote_server import ParameterServer, EpisodeRecorder
-from ray_utils.remote_actors import SimulationSupervisor, BufferCollector  # , GPULoader
-from ray_utils.init_ray import initialize_single_machine_ray
+from system_utils.buffer_collector import BufferCollector
+from system_utils.simulation_supervisor import SimulationSupervisor
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
@@ -27,7 +22,6 @@ parser.add_argument("--exp_name", type=str, default='ray_test0', help='experimen
 parser.add_argument("--wandb_group", type=str, default='mujoco', help='weights & biases group name')
 parser.add_argument("--wandb_job", type=str, default='run 100M', help='weights & biases job name')
 parser.add_argument("--no_summary", action='store_true', help='whether to write summary')
-parser.add_argument("--record_mem", action='store_true', help='whether to store mem info, which is slow')
 parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
 parser.add_argument('--verbose', action='store_true', help='whether to output debug imformation')
 
@@ -57,6 +51,7 @@ parser.add_argument('--max_timesteps', type=int, default=int(1e6), help='episode
 parser.add_argument('--min_return_chunk_num', type=int, default=32, help='minimal chunk number before env.collect')
 
 # Ray distributed training parameters
+parser.add_argument('--num_supervisors', type=int, default=1, help='# of postprocessors')
 parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
 parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
@@ -122,9 +117,9 @@ kwargs['action_scale'] = (high - low) / 2
 kwargs['continuous_env'] = True
 del init_env
 
+SHAPES = get_shapes(kwargs)
+
 if __name__ == "__main__":
-    if kwargs['record_mem']:
-        process = psutil.Process(os.getpid())
     exp_start_time = time.time()
 
     # set random seed
@@ -143,152 +138,144 @@ if __name__ == "__main__":
                          config=kwargs)
         config = wandb.config
 
-    initialize_single_machine_ray(config)
-
     # initialize learner, who is responsible for gradient update
     learner = build_learner_model(kwargs)
     optimizer = optim.Adam(learner.parameters(), lr=config.lr)
-    init_weights = learner.get_weights()
+    # to efficiently broadcast updated weights into workers,
+    # use shared memory tensor to communicate with each subprocess
+    global_weights = learner.get_weights()
+    for v in global_weights.values():
+        v.share_memory_()
+    weights_available = torch.ones(config.num_supervisors).share_memory_()
 
     # initialize buffer
     buffer_maxsize = config.batch_size * config.q_size
-    buffer = SharedCircularBuffer(buffer_maxsize, config.reuse_times, EnvWithMemory.get_storage_properties(kwargs),
-                                  config.batch_size, config.num_collectors)
+    buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times, SHAPES, config.batch_size,
+                                  config.num_collectors, Seg)
 
     # initialize workers, who are responsible for interacting with env (simulation)
-    ps = ParameterServer.remote(weights=init_weights)
-    recorder = EpisodeRecorder.remote()
-    supervisor = SimulationSupervisor(model_fn=build_worker_model,
-                                      worker_env_fn=build_worker_env,
-                                      ps=ps,
-                                      recorder=recorder,
-                                      global_buffer=buffer,
-                                      kwargs=kwargs)
+    queue_utils = [torch.tensor(0.0).share_memory_() for _ in range(config.num_supervisors)]
+    ep_info_dicts = [{
+        k + '/' + stat_k: torch.tensor(0.0).share_memory_()
+        for k in Info._fields for stat_k in ['avg', 'min', 'max']
+    } for _ in range(config.num_supervisors)]
+    supervisors = [
+        SimulationSupervisor(
+            supervisor_id=i,
+            rollout_keys=ROLLOUT_KEYS,
+            collect_keys=COLLECT_KEYS,
+            model_fn=build_worker_model,
+            worker_env_fn=build_worker_env,
+            global_buffer=buffer,
+            weights=global_weights,
+            weights_available=weights_available,
+            ep_info_dict=ep_info_dicts[i],
+            queue_util=queue_utils[i],
+            kwargs=kwargs,
+        ) for i in range(config.num_supervisors)
+    ]
     # after starting simulation thread, workers asynchronously interact with
     # environments and send data into buffer via Ray backbone
-    supervisor.start()
+    for supervisor in supervisors:
+        supervisor.start()
 
-    shm_tensor_dicts = [
-        dict(
-            **{
-                k: torch.zeros(config.chunk_len, config.batch_size, *shape).share_memory_()
-                for k, shape in EnvWithMemory.get_collect_shapes(kwargs).items()
-            }) for _ in range(config.num_collectors)
-    ]
-    available_flags = [torch.zeros(1).share_memory_() for _ in range(config.num_collectors)]
-    readies = [mp.Condition(mp.Lock()) for _ in range(config.num_collectors)]
+    # initialize buffer collectors, who are responsible for copying buffer data
+    # into shared memory tensor dicts
+    shm_tensor_dicts = []
+    for _ in range(config.num_collectors):
+        d = {}
+        for k, shp in SHAPES.items():
+            if 'rnn_hidden' in k:
+                d[k] = torch.zeros(shp[0], config.batch_size, *shp[1:]).share_memory_()
+            else:
+                d[k] = torch.zeros(config.chunk_len, config.batch_size, *shp).share_memory_()
+        shm_tensor_dicts.append(d)
+    # flags indicating whether data in shm tensor is ready for optimization
+    available_flags = [torch.zeros(1, dtype=torch.uint8).share_memory_() for _ in range(config.num_collectors)]
+    # condition locks
+    sample_readies = [mp.Condition(mp.Lock()) for _ in range(config.num_collectors)]
     buffer_collectors = [
-        BufferCollector(buffer, shm_tensor_dicts[i], available_flags[i], readies[i])
+        BufferCollector(i, buffer, shm_tensor_dicts[i], available_flags[i], sample_readies[i])
         for i in range(kwargs['num_collectors'])
     ]
     for collector in buffer_collectors:
         collector.start()
 
-    ray_proc_name = ['ray::Worker']  # , 'raylet', 'ray::Param', 'ray::Ret']
-    ray_proc = None
-
     # main loop
     global_step = 0
     num_frames = 0
-    buffer_collector_cnt = 0
+    coll_cnt = 0
     while num_frames < kwargs['total_frames']:
-        '''
-            sample from buffer
-        '''
         iter_start = time.time()
-        # wait until there's enough data in buffer
-        while not available_flags[buffer_collector_cnt]:
-            buffer_collector_cnt = (buffer_collector_cnt + 1) % config.num_collectors
-        try:
-            readies[buffer_collector_cnt].acquire()
-            data_batch = shm_tensor_dicts[buffer_collector_cnt].copy()
-            available_flags[buffer_collector_cnt].copy_(torch.zeros(1))
-            readies[buffer_collector_cnt].notify()
-        finally:
-            readies[buffer_collector_cnt].release()
-            buffer_collector_cnt = (buffer_collector_cnt + 1) % config.num_collectors
+        # wait until there's some collector ready
+        while not available_flags[coll_cnt]:
+            coll_cnt = (coll_cnt + 1) % config.num_collectors
         sample_time = time.time() - iter_start
 
-        if ray_proc is None and config.record_mem:
-            ray_proc = {k: [psutil.Process(pid) for pid in pgrep(k)] for k in ray_proc_name}
-
-        # pull from remote return recorder
-        return_stat_job = recorder.pull.remote()
-        num_frames += np.prod(data_batch['adv'].shape[:2])
+        num_frames += int(config.chunk_len * config.batch_size)
         global_step += 1
         '''
             update !
         '''
         start = time.time()
-        # convert numpy array to tensor and send them to desired device
-        for k, v in data_batch.items():
+        # copy shm tensor into desired device (GPU)
+        data_batch = {}
+        for k, v in shm_tensor_dicts[coll_cnt].items():
             data_batch[k] = v.to(**learner.tpdv)
+        try:
+            sample_readies[coll_cnt].acquire()
+            available_flags[coll_cnt].copy_(torch.zeros(1))
+            sample_readies[coll_cnt].notify(1)
+        finally:
+            sample_readies[coll_cnt].release()
+        coll_cnt = (coll_cnt + 1) % config.num_collectors
         load_gpu_time = time.time() - start
         # train learner
         loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)
         optimize_time = time.time() - start - load_gpu_time
 
-        # upload updated learner parameter to parameter server
+        # broadcast updated learner parameters to each subprocess
+        # then subprocess uploads them into remote parameter server
         if global_step % config.push_period == 0:
-            push_job = ps.set_weights.remote(learner.get_weights())
-            ray.get(push_job)
-            del push_job
-
-        return_record = ray.get(return_stat_job)
+            new_weights = learner.get_weights()
+            for k, v in new_weights.items():
+                global_weights[k].copy_(v)
+            weights_available.copy_(torch.ones(config.num_supervisors))
 
         dur = time.time() - iter_start
+
+        return_record = {k: np.mean([d[k].item() for d in ep_info_dicts]) for k in ep_info_dicts[0].keys()}
         print("----------------------------------------------")
         print(("Global Step: {}, Frames: {}, " + "Average Return: {:.2f}, " + "Sample Time: {:.2f}s, " +
                "Optimization Time: {:.2f}s, " + "Iteration Step Time: {:.2f}s").format(
                    global_step, num_frames, return_record['ep_return/avg'], sample_time, optimize_time, dur))
         print("----------------------------------------------")
 
-        # collect statistics to record
-        return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
-        loss_stat = {'loss/' + k: v for k, v in loss_stat.items()}
-        time_stat = {
-            'time/sample': sample_time,
-            'time/optimization': optimize_time,
-            'time/iteration': dur,
-            'time/load_gpu': load_gpu_time
-        }
-
-        ray_mem_info, main_mem_info = {}, {}
-        if config.record_mem:
-            for k, procs in ray_proc.items():
-                rss, pss, uss, cpu_per = [], [], [], []
-                for proc in procs:
-                    proc_meminfo = proc.memory_full_info()
-                    rss.append(proc_meminfo.rss)
-                    pss.append(proc_meminfo.pss)
-                    uss.append(proc_meminfo.uss)
-                    cpu_per.append(proc.cpu_percent() / 100)
-                ray_mem_info['ray/' + k + '/mean_rss'] = np.mean(rss) / 1024**3
-                ray_mem_info['ray/' + k + '/total_pss'] = np.sum(pss) / 1024**3
-                ray_mem_info['ray/' + k + '/total_uss'] = np.sum(uss) / 1024**3
-                ray_mem_info['ray/' + k + '/cpu_util'] = np.mean(cpu_per)
-
-            main_proc_meminfo = process.memory_full_info()
-            main_mem_info = {
-                'memory/main_rss': main_proc_meminfo.rss / 1024**3,
-                'memory/main_pss': main_proc_meminfo.pss / 1024**3,
-                'memory/main_uss': main_proc_meminfo.uss / 1024**3,
-                'memory/cpu_util': process.cpu_percent() / 100,
-            }
-        memory_stat = {
-            'buffer/utilization': buffer.get_util(),
-            'buffer/received_sample': buffer.get_received_sample(),
-            'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
-            'buffer/ready_id_queue_util': supervisor.get_ready_queue_util(),
-            **ray_mem_info,
-            **main_mem_info,
-        }
-
         if not args.no_summary:
-            wandb.log({**return_stat, **loss_stat, **time_stat, **memory_stat}, step=num_frames)
+            # collect statistics to record
+            return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
+            loss_stat = {'loss/' + k: v for k, v in loss_stat.items()}
+            time_stat = {
+                'time/sample': sample_time,
+                'time/optimization': optimize_time,
+                'time/iteration': dur,
+                'time/load_gpu': load_gpu_time
+            }
+            buffer_stat = {
+                'buffer/utilization': buffer.get_util(),
+                'buffer/received_sample': buffer.get_received_sample(),
+                'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
+                'buffer/ready_id_queue_util': np.mean([u.item() for u in queue_utils]),
+            }
 
-        del return_stat_job, return_record
+            # write summary into weights&biases
+            wandb.log({
+                **return_stat,
+                **loss_stat,
+                **time_stat,
+                **buffer_stat,
+            }, step=num_frames)
+
     if not args.no_summary:
         run.finish()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
-    ray.shutdown()
