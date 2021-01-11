@@ -24,7 +24,8 @@ do
                             --q_size 16 \
                             --num_writers 4 \
                             --num_supervisors 1 \
-                            --num_collectors 8
+                            --num_collectors 8 \
+                            --no_summary
     pkill -9 ray
     pkill -9 python3.8
     rm -rf /dev/shm/*

@@ -14,8 +14,8 @@ from env.atari.env_with_memory import EnvWithMemory, VecEnvWithMemory, ROLLOUT_K
 from env.atari.model.rec_model import ActorCritic
 from env.atari.wrappers import WarpFrame, FrameStack
 from rl_utils.buffer import SharedCircularBuffer
-from ray_utils.remote_actors import BufferCollector
-from ray_utils.simulation_supervisor import SimulationSupervisor
+from system_utils.buffer_collector import BufferCollector
+from system_utils.simulation_supervisor import SimulationSupervisor
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')

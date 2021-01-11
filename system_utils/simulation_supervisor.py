@@ -1,13 +1,13 @@
-import multiprocessing as mp
-from ray_utils.remote_actors import RolloutCollector
-from ray_utils.init_ray import initialize_single_machine_ray_on_supervisor
-from ray_utils.remote_server import ParameterServer
 import ray
 import torch
 import threading
 import queue
-from copy import deepcopy
 import numpy as np
+from copy import deepcopy
+import multiprocessing as mp
+from system_utils.worker import RolloutCollector
+from system_utils.init_ray import initialize_single_machine_ray_on_supervisor
+from system_utils.parameter_server import ParameterServer
 
 
 class SimulationSupervisor(mp.Process):
@@ -15,7 +15,6 @@ class SimulationSupervisor(mp.Process):
                  weights_available, ep_info_dict, queue_util, kwargs):
         super().__init__()
         assert kwargs['num_workers'] % kwargs['num_supervisors'] == 0
-        # assert kwargs['num_postprocessors'] % kwargs['num_supervisors'] == 0
         self.id = supervisor_id
         self.rollout_keys = rollout_keys
         self.collect_keys = collect_keys
@@ -36,8 +35,6 @@ class SimulationSupervisor(mp.Process):
         self.ps = ParameterServer.remote(self.weights)
         self.rollout_collector = RolloutCollector(
             supervisor_id=self.id,
-            #   rollout_keys=self.rollout_keys,
-            #   collect_keys=self.collect_keys,
             model_fn=self.model_fn,
             worker_env_fn=self.worker_env_fn,
             ps=self.ps,
