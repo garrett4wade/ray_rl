@@ -1,4 +1,5 @@
 import gym
+import ray
 import time
 import wandb
 import argparse
@@ -276,3 +277,4 @@ if __name__ == "__main__":
     if not args.no_summary:
         run.finish()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
+    ray.shutdown()
