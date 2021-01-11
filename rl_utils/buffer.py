@@ -206,22 +206,31 @@ class SharedCircularBuffer:
             self._read_ready.release()
 
     def get(self, target_shm_tensor_dict):
-        self._read_ready.acquire()
-        self._read_ready.wait_for(lambda: np.sum(self.is_ready) >= self.produced_batch_size)
+        try:
+            self._read_ready.acquire()
+            self._read_ready.wait_for(lambda: np.sum(self.is_ready) >= self.produced_batch_size)
+            indices = np.nonzero(self.is_ready)[0][:self.produced_batch_size]
+            self.is_busy[indices] = 1
+            self.is_ready[indices] = 0
+        finally:
+            self._read_ready.release()
 
-        indices = np.nonzero(self.is_ready)[0][:self.produced_batch_size]
         for k in self.storage._fields:
             target_shm_tensor_dict[k].copy_(from_numpy(getattr(self.storage, k)[:, indices]))
 
-        # for used-up samples, is_ready -> is_free
-        self.used_times[indices] += 1
-        used_up_indices = indices[self.used_times[indices] >= self.reuse_times]
-        self.used_times[used_up_indices] = 0
-        self.is_free[used_up_indices] = 1
-        self.is_ready[used_up_indices] = 0
-
-        # assert np.all(self.is_ready + self.is_busy + self.is_free)
-        self._read_ready.release()
+        try:
+            self._read_ready.acquire()
+            self.is_busy[indices] = 0
+            self.is_ready[indices] = 1
+            # for used-up samples, is_ready -> is_free
+            self.used_times[indices] += 1
+            used_up_indices = indices[self.used_times[indices] >= self.reuse_times]
+            self.used_times[used_up_indices] = 0
+            self.is_free[used_up_indices] = 1
+            self.is_ready[used_up_indices] = 0
+        finally:
+            # assert np.all(self.is_ready + self.is_busy + self.is_free)
+            self._read_ready.release()
 
     def get_util(self):
         return self.size() / self.maxsize

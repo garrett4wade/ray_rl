@@ -14,7 +14,7 @@ class SimulationSupervisor(mp.Process):
                  weights_available, info_queue, queue_util, kwargs):
         super().__init__()
         assert kwargs['num_workers'] % kwargs['num_supervisors'] == 0
-        assert kwargs['num_postprocessors'] % kwargs['num_supervisors'] == 0
+        # assert kwargs['num_postprocessors'] % kwargs['num_supervisors'] == 0
         self.id = supervisor_id
         self.rollout_keys = rollout_keys
         self.collect_keys = collect_keys
