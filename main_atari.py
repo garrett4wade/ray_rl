@@ -10,7 +10,8 @@ import torch.nn as nn
 import torch.optim as optim
 import multiprocessing as mp
 
-from env.atari.env_with_memory import EnvWithMemory, VecEnvWithMemory, ROLLOUT_KEYS, COLLECT_KEYS, Seg, Info
+from env.atari.env_with_memory import EnvWithMemory, VecEnvWithMemory
+from env.atari.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, Seg, Info
 from env.atari.model.rec_model import ActorCritic
 from env.atari.wrappers import WarpFrame, FrameStack
 from rl_utils.buffer import SharedCircularBuffer
@@ -116,6 +117,8 @@ kwargs['obs_dim'] = (4, 84, 84)
 kwargs['action_dim'] = init_env.action_space.n
 del init_env
 
+SHAPES = get_shapes(kwargs)
+
 if __name__ == "__main__":
     exp_start_time = time.time()
 
@@ -138,6 +141,8 @@ if __name__ == "__main__":
     # initialize learner, who is responsible for gradient update
     learner = build_learner_model(kwargs)
     optimizer = optim.Adam(learner.parameters(), lr=config.lr)
+    # to efficiently broadcast updated weights into workers,
+    # use shared memory tensor to communicate with each subprocess
     global_weights = learner.get_weights()
     for v in global_weights.values():
         v.share_memory_()
@@ -145,8 +150,8 @@ if __name__ == "__main__":
 
     # initialize buffer
     buffer_maxsize = config.batch_size * config.q_size
-    buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times,
-                                  EnvWithMemory.get_shapes(kwargs), config.batch_size, config.num_collectors, Seg)
+    buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times, SHAPES, config.batch_size,
+                                  config.num_collectors, Seg)
 
     # initialize workers, who are responsible for interacting with env (simulation)
     queue_utils = [torch.tensor(0.0).share_memory_() for _ in range(config.num_supervisors)]
@@ -174,16 +179,20 @@ if __name__ == "__main__":
     for supervisor in supervisors:
         supervisor.start()
 
-    shm_tensor_dicts = [
-        dict(
-            **{
-                k: torch.zeros(config.chunk_len, config.batch_size, *shape).share_memory_()
-                for k, shape in EnvWithMemory.get_shapes(kwargs).items()
-            }) for _ in range(config.num_collectors)
-    ]
-    for td in shm_tensor_dicts:
-        td['rnn_hidden'] = torch.zeros(1, config.batch_size, config.hidden_dim * 2).share_memory_()
+    # initialize buffer collectors, who are responsible for copying buffer data
+    # into shared memory tensor dicts
+    shm_tensor_dicts = []
+    for _ in range(config.num_collectors):
+        d = {}
+        for k, shp in SHAPES.items():
+            if 'rnn_hidden' in k:
+                d[k] = torch.zeros(shp[0], config.batch_size, *shp[1:]).share_memory_()
+            else:
+                d[k] = torch.zeros(config.chunk_len, config.batch_size, *shp).share_memory_()
+        shm_tensor_dicts.append(d)
+    # flags indicating whether data in shm tensor is ready for optimization
     available_flags = [torch.zeros(1, dtype=torch.uint8).share_memory_() for _ in range(config.num_collectors)]
+    # condition locks
     sample_readies = [mp.Condition(mp.Lock()) for _ in range(config.num_collectors)]
     buffer_collectors = [
         BufferCollector(i, buffer, shm_tensor_dicts[i], available_flags[i], sample_readies[i])
@@ -197,23 +206,19 @@ if __name__ == "__main__":
     num_frames = 0
     coll_cnt = 0
     while num_frames < kwargs['total_frames']:
-        '''
-            sample from buffer
-        '''
         iter_start = time.time()
-        # wait until there's enough data in buffer
+        # wait until there's some collector ready
         while not available_flags[coll_cnt]:
             coll_cnt = (coll_cnt + 1) % config.num_collectors
         sample_time = time.time() - iter_start
 
-        # pull from remote return recorder
         num_frames += int(config.chunk_len * config.batch_size)
         global_step += 1
         '''
             update !
         '''
         start = time.time()
-        # convert numpy array to tensor and send them to desired device
+        # copy shm tensor into desired device (GPU)
         data_batch = {}
         for k, v in shm_tensor_dicts[coll_cnt].items():
             data_batch[k] = v.to(**learner.tpdv)
@@ -229,15 +234,13 @@ if __name__ == "__main__":
         loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)
         optimize_time = time.time() - start - load_gpu_time
 
-        # upload updated learner parameter to parameter server
+        # broadcast updated learner parameters to each subprocess
+        # then subprocess uploads them into remote parameter server
         if global_step % config.push_period == 0:
             new_weights = learner.get_weights()
             for k, v in new_weights.items():
                 global_weights[k].copy_(v)
-            for v in global_weights.values():
-                assert v.is_shared()
             weights_available.copy_(torch.ones(config.num_supervisors))
-            assert weights_available.is_shared()
 
         dur = time.time() - iter_start
 

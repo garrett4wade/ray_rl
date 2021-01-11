@@ -1,32 +1,12 @@
 import numpy as np
 from scipy.signal import lfilter
-from collections import OrderedDict, namedtuple
-
-# NOTE: rnn_hidden must be the last one in keys
-ROLLOUT_KEYS = ['obs', 'action', 'action_logits', 'value', 'reward', 'pad_mask', 'rnn_hidden']
-COLLECT_KEYS = ['obs', 'action', 'action_logits', 'value', 'adv', 'value_target', 'pad_mask', 'rnn_hidden']
-assert 'rnn_hidden' not in ROLLOUT_KEYS or 'rnn_hidden' == ROLLOUT_KEYS[-1]
-assert 'rnn_hidden' not in COLLECT_KEYS or 'rnn_hidden' == COLLECT_KEYS[-1]
-Seg = namedtuple('Seg', COLLECT_KEYS)
-Info = namedtuple('Info', ['ep_return'])
+from env.atari.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, Seg, Info
 
 
 class EnvWithMemory:
-    def get_shapes(kwargs):
-        return OrderedDict({
-            'obs': kwargs['obs_dim'],
-            'action': (),
-            'action_logits': (kwargs['action_dim'], ),
-            'value': (),
-            'adv': (),
-            'value_target': (),
-            'pad_mask': (),
-            'rnn_hidden': (1, kwargs['hidden_dim'] * 2),
-        })
-
     def __init__(self, env_fn, kwargs):
         self.env = env_fn(kwargs)
-        self.shapes = EnvWithMemory.get_shapes(kwargs)
+        self.shapes = get_shapes(kwargs)
 
         self.stored_chunk_num = 0
         self.history_ep_datas = []
@@ -99,13 +79,13 @@ class EnvWithMemory:
         return [], [], self._get_model_input()
 
     def reset_history(self):
-        self.history = OrderedDict({})
+        self.history = {}
         for k in ROLLOUT_KEYS:
             self.history[k] = []
 
     def collect(self, bootstrap_value):
         v_target, adv = self.compute_gae(bootstrap_value)
-        data_batch = OrderedDict({})
+        data_batch = {}
         for k in COLLECT_KEYS:
             if k in ROLLOUT_KEYS:
                 data_batch[k] = np.stack(self.history[k], axis=0)
