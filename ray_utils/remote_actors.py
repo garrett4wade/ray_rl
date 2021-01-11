@@ -217,19 +217,6 @@ class RolloutCollector:
         return next(self._data_id_g)
 
 
-# class BufferWriter(mp.Process):
-#     def __init__(self, ready_queue, buffer):
-#         super().__init__()
-#         self.daemon = True
-#         self.ready_queue = ready_queue
-#         self.buffer = buffer
-
-#     def run(self):
-#         while True:
-#             blk = self.ready_queue.get()
-#             self.buffer.put(blk)
-
-
 class BufferCollector(mp.Process):
     def __init__(self, collector_id, buffer, shm_tensor_dict, available_flag, sample_ready):
         super().__init__()

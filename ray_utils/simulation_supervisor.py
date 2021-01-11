@@ -7,11 +7,12 @@ import torch
 import threading
 import queue
 from copy import deepcopy
+import numpy as np
 
 
 class SimulationSupervisor(mp.Process):
     def __init__(self, supervisor_id, rollout_keys, collect_keys, model_fn, worker_env_fn, global_buffer, weights,
-                 weights_available, info_queue, queue_util, kwargs):
+                 weights_available, ep_info_dict, queue_util, kwargs):
         super().__init__()
         assert kwargs['num_workers'] % kwargs['num_supervisors'] == 0
         # assert kwargs['num_postprocessors'] % kwargs['num_supervisors'] == 0
@@ -23,11 +24,12 @@ class SimulationSupervisor(mp.Process):
         self.global_buffer = global_buffer
         self.weights = weights
         self.weights_available = weights_available
-        self.info_queue = info_queue
+        self.ep_info_dict = ep_info_dict
         self.queue_util = queue_util
         self.kwargs = kwargs
 
         self.ready_id_queue = queue.Queue(maxsize=128)
+        self.history_info = []
 
     def run(self):
         initialize_single_machine_ray_on_supervisor(self.id, self.kwargs)
@@ -54,6 +56,15 @@ class SimulationSupervisor(mp.Process):
                 upload_job = self.ps.set_weights.remote(deepcopy(self.weights))
                 self.weights_available[self.id].copy_(torch.tensor(0))
                 self.queue_util.copy_(torch.tensor(self.ready_id_queue.qsize() / self.ready_id_queue.maxsize))
+                if len(self.history_info) > 0:
+                    for k in self.history_info[0]._fields:
+                        self.ep_info_dict[k + '/avg'].copy_(
+                            torch.tensor(np.mean([getattr(info, k) for info in self.history_info])))
+                        self.ep_info_dict[k + '/min'].copy_(
+                            torch.tensor(np.min([getattr(info, k) for info in self.history_info])))
+                        self.ep_info_dict[k + '/max'].copy_(
+                            torch.tensor(np.max([getattr(info, k) for info in self.history_info])))
+                    self.history_info = []
 
     def sample_from_rollout_collector(self):
         while True:
@@ -66,4 +77,4 @@ class SimulationSupervisor(mp.Process):
             segs, infos = ray.get(ready_sample_id)
             for seg in segs:
                 self.global_buffer.put(seg)
-            self.info_queue.put(infos)
+            self.history_info += infos
