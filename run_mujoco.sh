@@ -20,8 +20,7 @@ do
                             --num_workers ${num_worker} \
                             --min_return_chunk_num 16 \
                             --batch_size 10240 \
-                            --num_writers 4 \
-                            --num_collectors 4
+                            --num_writers 8
     pkill -9 ray
     pkill -9 python3.8
     rm -rf /dev/shm/*

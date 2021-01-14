@@ -8,13 +8,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import multiprocessing as mp
 
 from env.mujoco.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from env.mujoco.model.model import ActorCritic
 from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, Seg, Info
 from rl_utils.buffer import SharedCircularBuffer
-from system_utils.buffer_collector import BufferCollector
 from system_utils.simulation_supervisor import SimulationSupervisor
 
 # global configuration
@@ -177,37 +175,21 @@ if __name__ == "__main__":
     # environments and send data into buffer via Ray backbone
     supervisor.start()
 
-    # initialize buffer collectors, who are responsible for copying buffer data
-    # into shared memory tensor dicts
-    shm_tensor_dicts = []
-    for _ in range(config.num_collectors):
-        d = {}
-        for k, shp in SHAPES.items():
-            if 'rnn_hidden' in k:
-                d[k] = torch.zeros(shp[0], config.batch_size, *shp[1:]).share_memory_()
-            else:
-                d[k] = torch.zeros(config.chunk_len, config.batch_size, *shp).share_memory_()
-        shm_tensor_dicts.append(d)
-    # flags indicating whether data in shm tensor is ready for optimization
-    available_flags = [torch.zeros(1, dtype=torch.uint8).share_memory_() for _ in range(config.num_collectors)]
-    # condition locks
-    sample_readies = [mp.Condition(mp.Lock()) for _ in range(config.num_collectors)]
-    buffer_collectors = [
-        BufferCollector(i, buffer, shm_tensor_dicts[i], available_flags[i], sample_readies[i])
-        for i in range(kwargs['num_collectors'])
-    ]
-    for collector in buffer_collectors:
-        collector.start()
+    shm_tensor_dict = {}
+    for k, shp in SHAPES.items():
+        if 'rnn_hidden' in k:
+            shm_tensor_dict[k] = torch.zeros(shp[0], config.batch_size, *shp[1:]).to(**learner.tpdv)
+        else:
+            shm_tensor_dict[k] = torch.zeros(config.chunk_len, config.batch_size, *shp).to(**learner.tpdv)
 
     # main loop
     global_step = 0
     num_frames = 0
     coll_cnt = 0
     while num_frames < kwargs['total_frames']:
+        # sample and load into gpu
         iter_start = time.time()
-        # wait until there's some collector ready
-        while not available_flags[coll_cnt]:
-            coll_cnt = (coll_cnt + 1) % config.num_collectors
+        buffer.get(shm_tensor_dict)
         sample_time = time.time() - iter_start
 
         num_frames += int(config.chunk_len * config.batch_size)
@@ -216,21 +198,8 @@ if __name__ == "__main__":
             update !
         '''
         start = time.time()
-        # copy shm tensor into desired device (GPU)
-        data_batch = {}
-        for k, v in shm_tensor_dicts[coll_cnt].items():
-            data_batch[k] = v.to(**learner.tpdv)
-        try:
-            sample_readies[coll_cnt].acquire()
-            available_flags[coll_cnt].copy_(torch.zeros(1))
-            sample_readies[coll_cnt].notify(1)
-        finally:
-            sample_readies[coll_cnt].release()
-        coll_cnt = (coll_cnt + 1) % config.num_collectors
-        load_gpu_time = time.time() - start
-        # train learner
-        loss_stat = train_learner_on_batch(learner, optimizer, data_batch, config)
-        optimize_time = time.time() - start - load_gpu_time
+        loss_stat = train_learner_on_batch(learner, optimizer, shm_tensor_dict, config)
+        optimize_time = time.time() - start
 
         # broadcast updated learner parameters to each subprocess
         # then subprocess uploads them into remote parameter server
@@ -257,7 +226,6 @@ if __name__ == "__main__":
                 'time/sample': sample_time,
                 'time/optimization': optimize_time,
                 'time/iteration': dur,
-                'time/load_gpu': load_gpu_time
             }
             buffer_stat = {
                 'buffer/utilization': buffer.get_util(),

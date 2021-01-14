@@ -22,8 +22,7 @@ do
                             --min_return_chunk_num 16 \
                             --batch_size 512 \
                             --q_size 16 \
-                            --num_writers 8 \
-                            --num_collectors 8
+                            --num_writers 1
     pkill -9 ray
     pkill -9 python3.8
     rm -rf /dev/shm/*
