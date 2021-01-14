@@ -21,7 +21,6 @@ do
                             --min_return_chunk_num 16 \
                             --batch_size 10240 \
                             --num_writers 4 \
-                            --num_supervisors 1 \
                             --num_collectors 4
     pkill -9 ray
     pkill -9 python3.8

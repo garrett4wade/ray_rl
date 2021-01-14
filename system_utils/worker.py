@@ -49,14 +49,11 @@ class RolloutWorker:
 
 
 class RolloutCollector:
-    def __init__(self, supervisor_id, model_fn, worker_env_fn, ps, kwargs):
-        self.num_workers = kwargs['num_workers'] // kwargs['num_supervisors']
+    def __init__(self, model_fn, worker_env_fn, ps, kwargs):
+        self.num_workers = kwargs['num_workers']
         self.workers = [
-            RolloutWorker.remote(worker_id=i + supervisor_id * kwargs['num_supervisors'],
-                                 model_fn=model_fn,
-                                 worker_env_fn=worker_env_fn,
-                                 ps=ps,
-                                 kwargs=kwargs) for i in range(self.num_workers)
+            RolloutWorker.remote(worker_id=i, model_fn=model_fn, worker_env_fn=worker_env_fn, ps=ps, kwargs=kwargs)
+            for i in range(self.num_workers)
         ]
         self.working_jobs = []
         # job_hashing maps job id to worker index

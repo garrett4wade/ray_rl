@@ -88,11 +88,11 @@ class EnvWithMemory:
         data_batch = {}
         for k in COLLECT_KEYS:
             if k in ROLLOUT_KEYS:
-                data_batch[k] = np.stack(self.history[k], axis=0)
+                data_batch[k] = np.stack(self.history[k], axis=0).astype(np.float32)
             elif k == 'value_target':
-                data_batch[k] = v_target
+                data_batch[k] = v_target.astype(np.float32)
             elif k == 'adv':
-                data_batch[k] = adv
+                data_batch[k] = adv.astype(np.float32)
         return self.to_chunk(data_batch)
 
     def to_chunk(self, data_batch):

@@ -12,9 +12,9 @@ from system_utils.init_ray import initialize_ray_on_supervisor
 from system_utils.parameter_server import ParameterServer
 
 
-@ray.remote(num_cpus=0.2)
+@ray.remote(num_cpus=0.5)
 class Ray2ProcessSender:
-    def __init__(self, sender_id, ready_id_queue, port=23648):
+    def __init__(self, sender_id, ready_id_queue, port=257894):
         self.id = sender_id
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REQ)
@@ -33,7 +33,7 @@ class Ray2ProcessSender:
                 self.socket.recv()
 
 
-def receive_and_put(receiver_id, buffer, port=23648, flags=0, copy=True, track=False):
+def receive_and_put(receiver_id, buffer, port=257894, flags=0, copy=True, track=False):
     Seg = namedtuple('Seg', list(buffer.shapes.keys()))
     datalen_per_batch = 0
     for k, shp in buffer.shapes.items():
@@ -79,11 +79,9 @@ def receive_and_put(receiver_id, buffer, port=23648, flags=0, copy=True, track=F
 
 
 class SimulationSupervisor(mp.Process):
-    def __init__(self, supervisor_id, rollout_keys, collect_keys, model_fn, worker_env_fn, global_buffer, weights,
+    def __init__(self, rollout_keys, collect_keys, model_fn, worker_env_fn, global_buffer, weights,
                  weights_available, ep_info_dict, queue_util, kwargs):
         super().__init__()
-        assert kwargs['num_workers'] % kwargs['num_supervisors'] == 0
-        self.id = supervisor_id
         self.rollout_keys = rollout_keys
         self.collect_keys = collect_keys
         self.model_fn = model_fn
@@ -98,11 +96,10 @@ class SimulationSupervisor(mp.Process):
         self.history_info = []
 
     def run(self):
-        initialize_ray_on_supervisor(self.id, self.kwargs)
+        initialize_ray_on_supervisor(self.kwargs)
         self.ready_id_queue = RayQueue(maxsize=128)
         self.ps = ParameterServer.remote(self.weights)
-        self.rollout_collector = RolloutCollector(supervisor_id=self.id,
-                                                  model_fn=self.model_fn,
+        self.rollout_collector = RolloutCollector(model_fn=self.model_fn,
                                                   worker_env_fn=self.worker_env_fn,
                                                   ps=self.ps,
                                                   kwargs=self.kwargs)
@@ -120,10 +117,10 @@ class SimulationSupervisor(mp.Process):
 
         upload_job = []
         while True:
-            if self.weights_available[self.id]:
+            if self.weights_available:
                 ray.get(upload_job)
                 upload_job = self.ps.set_weights.remote(deepcopy(self.weights))
-                self.weights_available[self.id].copy_(torch.tensor(0))
+                self.weights_available.copy_(torch.tensor(0))
                 self.queue_util.copy_(torch.tensor(self.ready_id_queue.qsize() / 128))
                 if len(self.history_info) > 0:
                     for k in self.history_info[0]._fields:

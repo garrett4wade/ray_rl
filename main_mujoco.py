@@ -54,7 +54,6 @@ parser.add_argument('--min_return_chunk_num', type=int, default=32, help='minima
 
 # Ray distributed training parameters
 parser.add_argument('--ray_dashboard', action='store_true', help='use ray dashboard')
-parser.add_argument('--num_supervisors', type=int, default=1, help='# of postprocessors')
 parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
 parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
@@ -149,7 +148,7 @@ if __name__ == "__main__":
     global_weights = learner.get_weights()
     for v in global_weights.values():
         v.share_memory_()
-    weights_available = torch.ones(config.num_supervisors).share_memory_()
+    weights_available = torch.tensor(1).share_memory_()
 
     # initialize buffer
     buffer_maxsize = config.batch_size * config.q_size
@@ -157,30 +156,26 @@ if __name__ == "__main__":
                                   config.num_collectors, Seg)
 
     # initialize workers, who are responsible for interacting with env (simulation)
-    queue_utils = [torch.tensor(0.0).share_memory_() for _ in range(config.num_supervisors)]
-    ep_info_dicts = [{
+    queue_util = torch.tensor(0.0).share_memory_()
+    ep_info_dict = {
         k + '/' + stat_k: torch.tensor(0.0).share_memory_()
         for k in Info._fields for stat_k in ['avg', 'min', 'max']
-    } for _ in range(config.num_supervisors)]
-    supervisors = [
-        SimulationSupervisor(
-            supervisor_id=i,
-            rollout_keys=ROLLOUT_KEYS,
-            collect_keys=COLLECT_KEYS,
-            model_fn=build_worker_model,
-            worker_env_fn=build_worker_env,
-            global_buffer=buffer,
-            weights=global_weights,
-            weights_available=weights_available,
-            ep_info_dict=ep_info_dicts[i],
-            queue_util=queue_utils[i],
-            kwargs=kwargs,
-        ) for i in range(config.num_supervisors)
-    ]
+    }
+    supervisor = SimulationSupervisor(
+        rollout_keys=ROLLOUT_KEYS,
+        collect_keys=COLLECT_KEYS,
+        model_fn=build_worker_model,
+        worker_env_fn=build_worker_env,
+        global_buffer=buffer,
+        weights=global_weights,
+        weights_available=weights_available,
+        ep_info_dict=ep_info_dict,
+        queue_util=queue_util,
+        kwargs=kwargs,
+    )
     # after starting simulation thread, workers asynchronously interact with
     # environments and send data into buffer via Ray backbone
-    for supervisor in supervisors:
-        supervisor.start()
+    supervisor.start()
 
     # initialize buffer collectors, who are responsible for copying buffer data
     # into shared memory tensor dicts
@@ -243,11 +238,11 @@ if __name__ == "__main__":
             new_weights = learner.get_weights()
             for k, v in new_weights.items():
                 global_weights[k].copy_(v)
-            weights_available.copy_(torch.ones(config.num_supervisors))
+            weights_available.copy_(torch.tensor(1))
 
         dur = time.time() - iter_start
 
-        return_record = {k: np.mean([d[k].item() for d in ep_info_dicts]) for k in ep_info_dicts[0].keys()}
+        return_record = {k: v.item() for k, v in ep_info_dict.items()}
         print("----------------------------------------------")
         print(("Global Step: {}, Frames: {}, " + "Average Return: {:.2f}, " + "Sample Time: {:.2f}s, " +
                "Optimization Time: {:.2f}s, " + "Iteration Step Time: {:.2f}s").format(
@@ -268,7 +263,7 @@ if __name__ == "__main__":
                 'buffer/utilization': buffer.get_util(),
                 'buffer/received_sample': buffer.get_received_sample(),
                 'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
-                'buffer/ready_id_queue_util': np.mean([u.item() for u in queue_utils]),
+                'buffer/ready_id_queue_util': queue_util.item(),
             }
 
             # write summary into weights&biases
