@@ -1,7 +1,7 @@
 pkill -9 ray
 pkill -9 python3.8
 rm -rf /dev/shm/*
-num_workers=(32)
+num_workers=(48)
 num_env=16
 group_name="shm_buf"
 job_name="shm_buf"
