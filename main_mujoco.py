@@ -25,6 +25,7 @@ parser.add_argument("--wandb_job", type=str, default='run 100M', help='weights &
 parser.add_argument("--no_summary", action='store_true', help='whether to write summary')
 parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
 parser.add_argument('--verbose', action='store_true', help='whether to output debug imformation')
+parser.add_argument('--cluster', action='store_true', help='whether running on cluster')
 
 # environment
 parser.add_argument('--env_name', type=str, default='Humanoid-v2', help='name of env')

@@ -11,7 +11,7 @@ def initialize_single_machine_ray(config):
     print("Ray utilized cpu number: {}".format(num_cpus))
 
 
-def initialize_single_machine_ray_on_supervisor(supervisor_id, kwargs):
+def initialize_ray_on_supervisor(supervisor_id, kwargs):
     """initialize ray on supervisor, which is a subprocess to decouple sampling and optimization
 
     Args:
@@ -29,7 +29,10 @@ def initialize_single_machine_ray_on_supervisor(supervisor_id, kwargs):
         dashboard_kwargs['dashboard_port'] = int(8265 + supervisor_id)
     else:
         dashboard_kwargs['include_dashboard'] = False
-    ray.init(address='auto', # num_cpus=num_cpus,
-             # object_store_memory=int(1.5 * 1024**3 * kwargs['num_workers'] // kwargs['num_supervisors']),
-             **dashboard_kwargs)
-    print("Ray utilized cpu number: {}".format(num_cpus))
+    if kwargs['cluster']:
+        ray.init(address='auto', **dashboard_kwargs)
+    else:
+        ray.init(num_cpus=num_cpus,
+                 object_store_memory=int(1.5 * 1024**3 * kwargs['num_workers'] // kwargs['num_supervisors']),
+                 **dashboard_kwargs)
+        print("Ray utilized cpu number: {}".format(num_cpus))

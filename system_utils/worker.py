@@ -43,6 +43,7 @@ class RolloutWorker:
                 self.get_new_weights()
             self.pull_job = self.ps.pull.remote()
 
+    @ray.method(num_returns=2)
     def get(self):
         return next(self._data_g)
 
@@ -68,23 +69,23 @@ class RolloutCollector:
 
     def _start(self):
         for i in range(self.num_workers):
-            job = self.workers[i].get.remote()
-            self.working_jobs.append(job)
-            self.job_hashing[job] = i
+            sample_job, info_job = self.workers[i].get.remote()
+            self.working_jobs.append(sample_job)
+            self.job_hashing[sample_job] = (i, info_job)
 
     def _data_id_generator(self):
         # iteratively make worker active
         self._start()
         while True:
-            [ready_job], self.working_jobs = ray.wait(self.working_jobs, num_returns=1)
+            [ready_sample_job], self.working_jobs = ray.wait(self.working_jobs, num_returns=1)
 
-            worker_id = self.job_hashing[ready_job]
-            self.job_hashing.pop(ready_job)
+            worker_id, ready_info_job = self.job_hashing[ready_sample_job]
+            self.job_hashing.pop(ready_sample_job)
 
-            new_job = self.workers[worker_id].get.remote()
-            self.working_jobs.append(new_job)
-            self.job_hashing[new_job] = worker_id
-            yield ready_job
+            new_sample_job, new_info_job = self.workers[worker_id].get.remote()
+            self.working_jobs.append(new_sample_job)
+            self.job_hashing[new_sample_job] = (worker_id, new_info_job)
+            yield ready_sample_job, ready_info_job
 
     def get_sample_ids(self):
         return next(self._data_id_g)
