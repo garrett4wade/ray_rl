@@ -173,8 +173,10 @@ class SharedCircularBuffer:
         return self.size()
 
     def put(self, data_batch):
+        import time
         batch_size = data_batch[0].shape[1]
 
+        t1 = time.time()
         self._read_ready.acquire()
         try:
             indices = np.nonzero(self.is_free)[0][:batch_size]
@@ -189,10 +191,12 @@ class SharedCircularBuffer:
             # assert np.all(self.is_ready + self.is_busy + self.is_free)
         finally:
             self._read_ready.release()
+        t2 = time.time()
 
         for k in data_batch._fields:
             getattr(self.storage, k)[:, indices] = getattr(data_batch, k).copy()
 
+        t3 = time.time()
         self._read_ready.acquire()
         try:
             self.is_busy[indices] = 0
@@ -200,14 +204,20 @@ class SharedCircularBuffer:
             self.received_sample += batch_size
             # assert np.all(self.is_ready + self.is_busy + self.is_free)
             if np.sum(self.is_ready) >= self.produced_batch_size:
-                self._read_ready.notify(self.num_collectors)
+                self._read_ready.notify(1)
         finally:
             self._read_ready.release()
+        t4 = time.time()
+        print("PUT preprocess time: {:.2f}ms, copy time: {:.2f}ms, postprocess time: {:.2f}ms".format(
+            1e3 * (t2 - t1), 1e3 * (t3 - t2), 1e3 * (t4 - t3)))
 
     def get(self, target_shm_tensor_dict):
+        import time
+        t1 = time.time()
         try:
             self._read_ready.acquire()
             self._read_ready.wait_for(lambda: np.sum(self.is_ready) >= self.produced_batch_size)
+            tw = time.time()
             indices = np.random.choice(np.nonzero(self.is_ready)[0], self.produced_batch_size, replace=False)
             # for used-up samples, is_ready -> is_busy (in case of being overwritten) -> is_free
             # for non-used-up samples, is_ready -> is_ready (unchanged)
@@ -219,10 +229,12 @@ class SharedCircularBuffer:
             self.is_ready[used_up_indices] = 0
         finally:
             self._read_ready.release()
+        t2 = time.time()
 
         for k in self.storage._fields:
             target_shm_tensor_dict[k].copy_(from_numpy(getattr(self.storage, k)[:, indices]))
 
+        t3 = time.time()
         try:
             self._read_ready.acquire()
             self.is_busy[used_up_indices] = 0
@@ -230,6 +242,10 @@ class SharedCircularBuffer:
         finally:
             # assert np.all(self.is_ready + self.is_busy + self.is_free)
             self._read_ready.release()
+        t4 = time.time()
+        print(
+            "GET preprocess time: {:.2f}ms, copy time: {:.2f}ms, postprocess time: {:.2f}ms, wait time {:.2f}ms".format(
+                1e3 * (t2 - t1), 1e3 * (t3 - t2), 1e3 * (t4 - t3), 1e3 * (tw - t1)))
 
     def get_util(self):
         return self.size() / self.maxsize

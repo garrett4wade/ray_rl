@@ -3,6 +3,7 @@ import torch
 import threading
 from ray.util.queue import Queue as RayQueue
 import zmq
+import os
 import numpy as np
 from copy import deepcopy
 from collections import OrderedDict, namedtuple
@@ -14,26 +15,27 @@ from system_utils.parameter_server import ParameterServer
 
 @ray.remote(num_cpus=0.5)
 class Ray2ProcessSender:
-    def __init__(self, sender_id, ready_id_queue, port=257894):
+    def __init__(self, sender_id, ready_id_queue):
         self.id = sender_id
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REQ)
-        self.socket.bind('tcp://*:' + str(port + self.id))
+        self.socket.bind('ipc:///dev/shm/ray2proc')
         self.ready_id_queue = ready_id_queue
 
     def send_seg(self, seg, flags=0, copy=True, track=False):
         data = np.concatenate([x.reshape(-1) for x in seg])
+        del seg
         return self.socket.send(data, flags, copy=copy, track=track)
 
     def run(self):
         while True:
-            segs = self.ready_id_queue.get()
-            for seg in segs:
-                self.send_seg(seg)
-                self.socket.recv()
+            seg = self.ready_id_queue.get()
+            self.send_seg(seg)
+            self.socket.recv()
 
 
 def receive_and_put(receiver_id, buffer, port=257894, flags=0, copy=True, track=False):
+    os.setpriority(os.PRIO_PROCESS, os.getpid(), 1)
     Seg = namedtuple('Seg', list(buffer.shapes.keys()))
     datalen_per_batch = 0
     for k, shp in buffer.shapes.items():
@@ -44,7 +46,7 @@ def receive_and_put(receiver_id, buffer, port=257894, flags=0, copy=True, track=
 
     context = zmq.Context()
     socket = context.socket(zmq.REP)
-    socket.connect('tcp://localhost:' + str(port + receiver_id))
+    socket.connect('ipc:///dev/shm/ray2proc')
     while True:
         msg = socket.recv(flags=flags, copy=copy, track=track)
         buf = memoryview(msg)
@@ -97,7 +99,7 @@ class SimulationSupervisor(mp.Process):
 
     def run(self):
         initialize_ray_on_supervisor(self.kwargs)
-        self.ready_id_queue = RayQueue(maxsize=128)
+        self.ready_id_queue = RayQueue(maxsize=4 * self.kwargs['num_workers'])
         self.ps = ParameterServer.remote(self.weights)
         self.rollout_collector = RolloutCollector(model_fn=self.model_fn,
                                                   worker_env_fn=self.worker_env_fn,
@@ -121,7 +123,7 @@ class SimulationSupervisor(mp.Process):
                 ray.get(upload_job)
                 upload_job = self.ps.set_weights.remote(deepcopy(self.weights))
                 self.weights_available.copy_(torch.tensor(0))
-                self.queue_util.copy_(torch.tensor(self.ready_id_queue.qsize() / 128))
+                self.queue_util.copy_(torch.tensor(self.ready_id_queue.qsize() / (4 * self.kwargs['num_workers'])))
                 if len(self.history_info) > 0:
                     for k in self.history_info[0]._fields:
                         self.ep_info_dict[k + '/avg'].copy_(

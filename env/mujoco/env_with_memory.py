@@ -120,19 +120,32 @@ class EnvWithMemory:
 
 class VecEnvWithMemory:
     def __init__(self, env_fns):
+        self.num_envs = len(env_fns)
         self.envs = [env_fn() for env_fn in env_fns]
+        self.data_history = []
+        self.info_hisotry = []
+        self.data_cnt = 0
 
     def step(self, *args):
-        datas, infos, model_inputs = [], [], []
+        model_inputs = []
         for i, env in enumerate(self.envs):
             cur_datas, cur_infos, model_input = env.step(*[arg[i] for arg in args])
-            datas += cur_datas
-            infos += cur_infos
+            if len(cur_datas) > 0:
+                self.data_history += cur_datas
+                self.info_hisotry += cur_infos
+                self.data_cnt += 1
             model_inputs.append(model_input)
-        stacked_model_inputs = []
-        for inp in zip(*model_inputs):
-            stacked_model_inputs.append(np.stack(inp))
-        return datas, infos, stacked_model_inputs
+        stacked_model_inputs = [np.stack(inp) for inp in zip(*model_inputs)]
+        if self.data_cnt >= self.num_envs:
+            seg = Seg(*[np.concatenate([getattr(x, k) for x in self.data_history], axis=1) for k in Seg._fields])
+            infos = self.info_hisotry.copy()
+            self.data_history = []
+            self.info_hisotry = []
+            self.data_cnt = 0
+        else:
+            seg = ()
+            infos = []
+        return seg, infos, stacked_model_inputs
 
     def get_model_inputs(self):
         model_inputs = [env._get_model_input() for env in self.envs]

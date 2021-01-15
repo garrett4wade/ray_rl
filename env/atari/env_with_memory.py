@@ -136,7 +136,11 @@ class VecEnvWithMemory:
         stacked_model_inputs = []
         for inp in zip(*model_inputs):
             stacked_model_inputs.append(np.stack(inp))
-        return datas, infos, stacked_model_inputs
+        if len(datas) > 0:
+            seg = Seg(*[np.concatenate([getattr(x, k) for x in datas], axis=1) for k in Seg._fields])
+        else:
+            seg = ()
+        return seg, infos, stacked_model_inputs
 
     def get_model_inputs(self):
         model_inputs = [env._get_model_input() for env in self.envs]

@@ -1,3 +1,4 @@
+import os
 import gym
 import ray
 import time
@@ -121,6 +122,7 @@ SHAPES = get_shapes(kwargs)
 
 if __name__ == "__main__":
     exp_start_time = time.time()
+    os.setpriority(os.PRIO_PROCESS, os.getpid(), 0)
 
     # set random seed
     torch.manual_seed(kwargs['seed'])
