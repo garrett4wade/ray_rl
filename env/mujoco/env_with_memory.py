@@ -4,23 +4,23 @@ from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, 
 
 
 class EnvWithMemory:
-    def __init__(self, env_fn, kwargs):
-        self.env = env_fn(kwargs)
-        self.shapes = get_shapes(kwargs)
+    def __init__(self, env_fn, config):
+        self.env = env_fn(config)
+        self.shapes = get_shapes(config)
 
         self.stored_chunk_num = 0
         self.history_ep_datas = []
         self.history_ep_infos = []
 
-        self.chunk_len = kwargs['chunk_len']
+        self.chunk_len = config.chunk_len
         self.step_size = self.chunk_len
-        self.min_return_chunk_num = kwargs['min_return_chunk_num']
+        self.min_return_chunk_num = config.min_return_chunk_num
 
-        self.gamma = kwargs['gamma']
-        self.lmbda = kwargs['lmbda']
-        self.max_timesteps = kwargs['max_timesteps']
+        self.gamma = config.gamma
+        self.lmbda = config.lmbda
+        self.max_timesteps = config.max_timesteps
 
-        self.verbose = kwargs['verbose']
+        self.verbose = config.verbose
         self.reset()
 
     def _preprocess(self, obs):
@@ -120,31 +120,22 @@ class EnvWithMemory:
 
 class VecEnvWithMemory:
     def __init__(self, env_fns):
-        self.num_envs = len(env_fns)
         self.envs = [env_fn() for env_fn in env_fns]
-        self.data_history = []
-        self.info_hisotry = []
-        self.data_cnt = 0
 
     def step(self, *args):
-        model_inputs = []
+        datas, infos, model_inputs = [], [], []
         for i, env in enumerate(self.envs):
             cur_datas, cur_infos, model_input = env.step(*[arg[i] for arg in args])
-            if len(cur_datas) > 0:
-                self.data_history += cur_datas
-                self.info_hisotry += cur_infos
-                self.data_cnt += 1
+            datas += cur_datas
+            infos += cur_infos
             model_inputs.append(model_input)
-        stacked_model_inputs = [np.stack(inp) for inp in zip(*model_inputs)]
-        if self.data_cnt >= self.num_envs:
-            seg = Seg(*[np.concatenate([getattr(x, k) for x in self.data_history], axis=1) for k in Seg._fields])
-            infos = self.info_hisotry.copy()
-            self.data_history = []
-            self.info_hisotry = []
-            self.data_cnt = 0
+        stacked_model_inputs = []
+        for inp in zip(*model_inputs):
+            stacked_model_inputs.append(np.stack(inp))
+        if len(datas) > 0:
+            seg = Seg(*[np.concatenate([getattr(x, k) for x in datas], axis=1) for k in Seg._fields])
         else:
             seg = ()
-            infos = []
         return seg, infos, stacked_model_inputs
 
     def get_model_inputs(self):

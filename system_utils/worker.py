@@ -4,12 +4,12 @@ import time
 
 @ray.remote(num_cpus=1)
 class RolloutWorker:
-    def __init__(self, worker_id, model_fn, worker_env_fn, ps, kwargs):
+    def __init__(self, worker_id, model_fn, worker_env_fn, ps, config):
         self.id = worker_id
-        self.verbose = kwargs['verbose']
+        self.verbose = config.verbose
 
-        self.env = worker_env_fn(worker_id, kwargs)
-        self.model = model_fn(kwargs)
+        self.env = worker_env_fn(worker_id, config)
+        self.model = model_fn(config)
 
         self.ps = ps
         self.weight_hash = None
@@ -50,10 +50,10 @@ class RolloutWorker:
 
 
 class RolloutCollector:
-    def __init__(self, model_fn, worker_env_fn, ps, kwargs):
-        self.num_workers = kwargs['num_workers']
+    def __init__(self, model_fn, worker_env_fn, ps, config):
+        self.num_workers = config.num_workers
         self.workers = [
-            RolloutWorker.remote(worker_id=i, model_fn=model_fn, worker_env_fn=worker_env_fn, ps=ps, kwargs=kwargs)
+            RolloutWorker.remote(worker_id=i, model_fn=model_fn, worker_env_fn=worker_env_fn, ps=ps, config=config)
             for i in range(self.num_workers)
         ]
         self.working_jobs = []

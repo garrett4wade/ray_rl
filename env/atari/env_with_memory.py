@@ -4,23 +4,23 @@ from env.atari.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, S
 
 
 class EnvWithMemory:
-    def __init__(self, env_fn, kwargs):
-        self.env = env_fn(kwargs)
-        self.shapes = get_shapes(kwargs)
+    def __init__(self, env_fn, config):
+        self.env = env_fn(config)
+        self.shapes = get_shapes(config)
 
         self.stored_chunk_num = 0
         self.history_ep_datas = []
         self.history_ep_infos = []
 
-        self.chunk_len = kwargs['chunk_len']
+        self.chunk_len = config.chunk_len
         self.step_size = self.chunk_len
-        self.min_return_chunk_num = kwargs['min_return_chunk_num']
+        self.min_return_chunk_num = config.min_return_chunk_num
 
-        self.gamma = kwargs['gamma']
-        self.lmbda = kwargs['lmbda']
-        self.max_timesteps = kwargs['max_timesteps']
+        self.gamma = config.gamma
+        self.lmbda = config.lmbda
+        self.max_timesteps = config.max_timesteps
 
-        self.verbose = kwargs['verbose']
+        self.verbose = config.verbose
         self.reset()
 
     def _preprocess(self, obs):

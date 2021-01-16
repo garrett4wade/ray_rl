@@ -21,11 +21,11 @@ DTYPES = OrderedDict({
 })
 
 
-def get_shapes(kwargs):
+def get_shapes(config):
     return OrderedDict({
-        'obs': (kwargs['obs_dim'], ),
-        'action': (kwargs['action_dim'], ),
-        'action_logits': (kwargs['action_dim'] * 2, ),
+        'obs': (config.obs_dim, ),
+        'action': (config.action_dim, ),
+        'action_logits': (config.action_dim * 2, ),
         'value': (),
         'adv': (),
         'value_target': (),

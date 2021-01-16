@@ -81,7 +81,7 @@ def receive_and_put(receiver_id, buffer, flags=0, copy=True, track=False):
 
 class SimulationSupervisor(mp.Process):
     def __init__(self, rollout_keys, collect_keys, model_fn, worker_env_fn, global_buffer, weights, weights_available,
-                 ep_info_dict, queue_util, wait_time, kwargs):
+                 ep_info_dict, queue_util, wait_time, config):
         super().__init__()
         self.rollout_keys = rollout_keys
         self.collect_keys = collect_keys
@@ -93,27 +93,27 @@ class SimulationSupervisor(mp.Process):
         self.ep_info_dict = ep_info_dict
         self.queue_util = queue_util
         self.wait_time = wait_time
-        self.kwargs = kwargs
+        self.config = config
 
         self.history_info = []
         self.wait_times = []
 
     def run(self):
-        initialize_ray_on_supervisor(self.kwargs)
-        self.ready_id_queue = RayQueue(maxsize=4 * self.kwargs['num_workers'])
+        initialize_ray_on_supervisor(self.config)
+        self.ready_id_queue = RayQueue(maxsize=4 * self.config.num_workers)
         self.ps = ParameterServer.remote(self.weights)
         self.rollout_collector = RolloutCollector(model_fn=self.model_fn,
                                                   worker_env_fn=self.worker_env_fn,
                                                   ps=self.ps,
-                                                  kwargs=self.kwargs)
+                                                  config=self.config)
         sample_job = threading.Thread(target=self.sample_from_rollout_collector, daemon=True)
         sample_job.start()
 
-        senders = [Ray2ProcessSender.remote(i, self.ready_id_queue) for i in range(self.kwargs['num_writers'])]
+        senders = [Ray2ProcessSender.remote(i, self.ready_id_queue) for i in range(self.config.num_writers)]
         for sender in senders:
             sender.run.remote()
         receivers = [
-            mp.Process(target=receive_and_put, args=(i, self.global_buffer)) for i in range(self.kwargs['num_writers'])
+            mp.Process(target=receive_and_put, args=(i, self.global_buffer)) for i in range(self.config.num_writers)
         ]
         for receiver in receivers:
             receiver.start()
@@ -124,7 +124,7 @@ class SimulationSupervisor(mp.Process):
                 ray.get(upload_job)
                 upload_job = self.ps.set_weights.remote(deepcopy(self.weights))
                 self.weights_available.copy_(torch.tensor(0))
-                self.queue_util.copy_(torch.tensor(self.ready_id_queue.qsize() / (4 * self.kwargs['num_workers'])))
+                self.queue_util.copy_(torch.tensor(self.ready_id_queue.qsize() / (4 * self.config.num_workers)))
                 if len(self.wait_times) > 0:
                     self.wait_time.copy_(torch.tensor(np.mean(self.wait_times)))
                     self.wait_times = []

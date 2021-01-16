@@ -6,16 +6,16 @@ from torch.distributions import Categorical
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, is_training, kwargs):
+    def __init__(self, is_training, config):
         super().__init__()
         self.is_training = is_training
         if not is_training:
             self.device = torch.device('cpu')
         else:
-            self.device = torch.device(kwargs['gpu_id'] if torch.cuda.is_available() else 'cpu')
+            self.device = torch.device(config.gpu_id if torch.cuda.is_available() else 'cpu')
 
-        self.action_dim = action_dim = kwargs['action_dim']
-        self.hidden_dim = hidden_dim = kwargs['hidden_dim']
+        self.action_dim = action_dim = config.action_dim
+        self.hidden_dim = hidden_dim = config.hidden_dim
 
         # default convolutional model in rllib
         self.feature_net = nn.Sequential(
@@ -35,7 +35,7 @@ class ActorCritic(nn.Module):
         # critic
         self.value_layer = nn.Linear(hidden_dim, 1)
 
-        self.clip_ratio = kwargs['clip_ratio']
+        self.clip_ratio = config.clip_ratio
         self.tpdv = dict(device=self.device, dtype=torch.float32)
         self.to(self.device)
 

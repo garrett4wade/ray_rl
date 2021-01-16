@@ -7,14 +7,10 @@ import argparse
 import numpy as np
 
 import torch
-import torch.nn as nn
-import torch.optim as optim
-
 from env.mujoco.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from env.mujoco.model.model import ActorCritic
 from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Seg, Info
-from rl_utils.buffer import SharedCircularBuffer
-from system_utils.simulation_supervisor import SimulationSupervisor
+from runner import Runner
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
@@ -67,48 +63,35 @@ args = parser.parse_args()
 kwargs = vars(args)
 
 
-def build_simple_env(kwargs, seed=0):
-    env = gym.make(kwargs['env_name'])
+def build_simple_env(config, seed=0):
+    env = gym.make(config.env_name)
     env.seed(seed)
     return env
 
 
-def build_worker_env(worker_id, kwargs):
+def build_worker_env(worker_id, config):
     env_fns = []
-    for i in range(kwargs['env_num']):
-        env_id = worker_id + i * kwargs['num_workers']
-        seed = 12345 * env_id + kwargs['seed']
-        env_fns.append(lambda: EnvWithMemory(lambda kwargs: build_simple_env(kwargs, seed=seed), kwargs))
+    for i in range(config.env_num):
+        env_id = worker_id + i * config.num_workers
+        seed = 12345 * env_id + config.seed
+        env_fns.append(lambda: EnvWithMemory(lambda config: build_simple_env(config, seed=seed), config))
     return VecEnvWithMemory(env_fns)
 
 
-def build_worker_model(kwargs):
+def build_worker_model(config):
     # model for interacting with env, does not need gradient update
     # instead, download parameters from parameter server (ps)
-    return ActorCritic(False, kwargs)
+    return ActorCritic(False, config)
 
 
-def build_learner_model(kwargs):
+def build_learner_model(config):
     # model for gradient update
     # after update, upload parameters to parameter server
-    return ActorCritic(True, kwargs)
-
-
-def train_learner_on_batch(learner, optimizer, data_batch, config):
-    optimizer.zero_grad()
-    v_loss, p_loss, entropy_loss = learner.compute_loss(**data_batch)
-    loss = p_loss + config.value_coef * v_loss + config.entropy_coef * entropy_loss
-    loss.backward()
-    grad_norm = nn.utils.clip_grad_norm_(learner.parameters(), config.max_grad_norm)
-    optimizer.step()
-    return dict(v_loss=v_loss.item(),
-                p_loss=p_loss.item(),
-                entropy_loss=entropy_loss.item(),
-                grad_norm=grad_norm.item())
+    return ActorCritic(True, config)
 
 
 # get state/action information from env
-init_env = build_simple_env(kwargs)
+init_env = build_simple_env(args)
 kwargs['obs_dim'] = init_env.observation_space.shape[0]
 kwargs['action_dim'] = init_env.action_space.shape[0]
 high = init_env.action_space.high
@@ -118,7 +101,7 @@ kwargs['action_scale'] = (high - low) / 2
 kwargs['continuous_env'] = True
 del init_env
 
-SHAPES = get_shapes(kwargs)
+SHAPES = get_shapes(args)
 
 if __name__ == "__main__":
     exp_start_time = time.time()
@@ -140,114 +123,17 @@ if __name__ == "__main__":
                          config=kwargs)
         config = wandb.config
 
-    # initialize learner, who is responsible for gradient update
-    learner = build_learner_model(kwargs)
-    optimizer = optim.Adam(learner.parameters(), lr=config.lr)
-    # to efficiently broadcast updated weights into workers,
-    # use shared memory tensor to communicate with each subprocess
-    global_weights = learner.get_weights()
-    for v in global_weights.values():
-        v.share_memory_()
-    weights_available = torch.tensor(1).share_memory_()
-
-    # initialize buffer
-    buffer_maxsize = config.batch_size * config.q_size
-    buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times, SHAPES, DTYPES,
-                                  config.batch_size, Seg)
-
-    # initialize workers, who are responsible for interacting with env (simulation)
-    queue_util = torch.tensor(0.0).share_memory_()
-    wait_time = torch.tensor(0.0).share_memory_()
-    ep_info_dict = {
-        k + '/' + stat_k: torch.tensor(0.0).share_memory_()
-        for k in Info._fields for stat_k in ['avg', 'min', 'max']
-    }
-    supervisor = SimulationSupervisor(
-        rollout_keys=ROLLOUT_KEYS,
-        collect_keys=COLLECT_KEYS,
-        model_fn=build_worker_model,
-        worker_env_fn=build_worker_env,
-        global_buffer=buffer,
-        weights=global_weights,
-        weights_available=weights_available,
-        ep_info_dict=ep_info_dict,
-        queue_util=queue_util,
-        wait_time=wait_time,
-        kwargs=kwargs,
-    )
-    # after starting simulation thread, workers asynchronously interact with
-    # environments and send data into buffer via Ray backbone
-    supervisor.start()
-
-    shm_tensor_dict = {}
-    for k, shp in SHAPES.items():
-        if 'rnn_hidden' in k:
-            shm_tensor_dict[k] = torch.zeros((shp[0], config.batch_size, *shp[1:]),
-                                             dtype=getattr(torch, DTYPES[k].__name__)).to(device=learner.device)
-        else:
-            shm_tensor_dict[k] = torch.zeros((config.chunk_len, config.batch_size, *shp),
-                                             dtype=getattr(torch, DTYPES[k].__name__)).to(device=learner.device)
-
-    # main loop
-    global_step = 0
-    num_frames = 0
-    coll_cnt = 0
-    while num_frames < kwargs['total_frames']:
-        # sample and load into gpu
-        iter_start = time.time()
-        buffer.get(shm_tensor_dict)
-        sample_time = time.time() - iter_start
-
-        num_frames += int(config.chunk_len * config.batch_size)
-        global_step += 1
-        '''
-            update !
-        '''
-        start = time.time()
-        loss_stat = train_learner_on_batch(learner, optimizer, shm_tensor_dict, config)
-        optimize_time = time.time() - start
-
-        # broadcast updated learner parameters to each subprocess
-        # then subprocess uploads them into remote parameter server
-        if global_step % config.push_period == 0:
-            new_weights = learner.get_weights()
-            for k, v in new_weights.items():
-                global_weights[k].copy_(v)
-            weights_available.copy_(torch.tensor(1))
-
-        dur = time.time() - iter_start
-
-        return_record = {k: v.item() for k, v in ep_info_dict.items()}
-        print("----------------------------------------------")
-        print(("Global Step: {}, Frames: {}, " + "Average Return: {:.2f}, " + "Sample Time: {:.2f}s, " +
-               "Optimization Time: {:.2f}s, " + "Iteration Step Time: {:.2f}s").format(
-                   global_step, num_frames, return_record['ep_return/avg'], sample_time, optimize_time, dur))
-        print("----------------------------------------------")
-
-        if not args.no_summary:
-            # collect statistics to record
-            return_stat = {'ep_return/' + k: v for k, v in return_record.items()}
-            loss_stat = {'loss/' + k: v for k, v in loss_stat.items()}
-            time_stat = {
-                'time/sample': sample_time,
-                'time/optimization': optimize_time,
-                'time/iteration': dur,
-            }
-            buffer_stat = {
-                'buffer/utilization': buffer.get_util(),
-                'buffer/received_sample': buffer.get_received_sample(),
-                'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
-                'buffer/ready_id_queue_util': queue_util.item(),
-                'buffer/ray_wait_time': wait_time.item(),
-            }
-
-            # write summary into weights&biases
-            wandb.log({
-                **return_stat,
-                **loss_stat,
-                **time_stat,
-                **buffer_stat,
-            }, step=num_frames)
+    runner = Runner(learner_model_fn=build_learner_model,
+                    worker_model_fn=build_worker_model,
+                    worker_env_fn=build_worker_env,
+                    rollout_keys=ROLLOUT_KEYS,
+                    collect_keys=COLLECT_KEYS,
+                    info_fn=Info,
+                    seg_fn=Seg,
+                    shapes=SHAPES,
+                    dtypes=DTYPES,
+                    config=config)
+    runner.run()
 
     if not args.no_summary:
         run.finish()

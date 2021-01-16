@@ -10,24 +10,24 @@ LOG_STD_MIN = -20
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, is_training, kwargs):
+    def __init__(self, is_training, config):
         super().__init__()
         self.is_training = is_training
         if not is_training:
             self.device = torch.device('cpu')
         else:
-            self.device = torch.device(kwargs['gpu_id'] if torch.cuda.is_available() else 'cpu')
+            self.device = torch.device(config.gpu_id if torch.cuda.is_available() else 'cpu')
 
-        action_scale = torch.from_numpy(kwargs['action_scale'].copy())
-        action_loc = torch.from_numpy(kwargs['action_loc'].copy())
+        action_scale = torch.from_numpy(config.action_scale.copy())
+        action_loc = torch.from_numpy(config.action_loc.copy())
         self.action_scale = nn.Parameter(action_scale).detach().to(self.device)
         self.action_loc = nn.Parameter(action_loc).detach().to(self.device)
 
-        obs_dim = kwargs['obs_dim']
-        action_dim = kwargs['action_dim']
-        hidden_dim = kwargs['hidden_dim']
+        obs_dim = config.obs_dim
+        action_dim = config.action_dim
+        hidden_dim = config.hidden_dim
 
-        self.action_dim = kwargs['action_dim']
+        self.action_dim = config.action_dim
         self.feature_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.LayerNorm(normalized_shape=[hidden_dim]),
                                          nn.ReLU(), nn.Linear(hidden_dim, hidden_dim),
                                          nn.LayerNorm(normalized_shape=[hidden_dim]), nn.ReLU())
@@ -36,7 +36,7 @@ class ActorCritic(nn.Module):
         # critic
         self.value_layer = nn.Linear(hidden_dim, 1)
 
-        self.clip_ratio = kwargs['clip_ratio']
+        self.clip_ratio = config.clip_ratio
         self.tpdv = dict(device=self.device, dtype=torch.float32)
         self.to(self.device)
 

@@ -22,14 +22,14 @@ DTYPES = OrderedDict({
 })
 
 
-def get_shapes(kwargs):
+def get_shapes(config):
     return OrderedDict({
-        'obs': kwargs['obs_dim'],
+        'obs': config.obs_dim,
         'action': (),
-        'action_logits': (kwargs['action_dim'], ),
+        'action_logits': (config.action_dim, ),
         'value': (),
         'adv': (),
         'value_target': (),
         'pad_mask': (),
-        'rnn_hidden': (1, kwargs['hidden_dim'] * 2),
+        'rnn_hidden': (1, config.hidden_dim * 2),
     })
