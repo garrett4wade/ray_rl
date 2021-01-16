@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.signal import lfilter
-from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, Seg, Info
+from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Seg, Info
 
 
 class EnvWithMemory:
@@ -84,11 +84,11 @@ class EnvWithMemory:
         data_batch = {}
         for k in COLLECT_KEYS:
             if k in ROLLOUT_KEYS:
-                data_batch[k] = np.stack(self.history[k], axis=0).astype(np.float32)
+                data_batch[k] = np.stack(self.history[k], axis=0).astype(DTYPES[k])
             elif k == 'value_target':
-                data_batch[k] = v_target.astype(np.float32)
+                data_batch[k] = v_target.astype(DTYPES[k])
             elif k == 'adv':
-                data_batch[k] = adv.astype(np.float32)
+                data_batch[k] = adv.astype(DTYPES[k])
         return self.to_chunk(data_batch)
 
     def to_chunk(self, data_batch):

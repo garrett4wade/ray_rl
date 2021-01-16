@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.optim as optim
 
 from env.atari.env_with_memory import EnvWithMemory, VecEnvWithMemory
-from env.atari.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, Seg, Info
+from env.atari.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Seg, Info
 from env.atari.model.rec_model import ActorCritic
 from env.atari.wrappers import WarpFrame, FrameStack
 from rl_utils.buffer import SharedCircularBuffer
@@ -149,11 +149,12 @@ if __name__ == "__main__":
 
     # initialize buffer
     buffer_maxsize = config.batch_size * config.q_size
-    buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times, SHAPES, config.batch_size,
-                                  config.num_collectors, Seg)
+    buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times, SHAPES, DTYPES,
+                                  config.batch_size, Seg)
 
     # initialize workers, who are responsible for interacting with env (simulation)
     queue_util = torch.tensor(0.0).share_memory_()
+    wait_time = torch.tensor(0.0).share_memory_()
     ep_info_dict = {
         k + '/' + stat_k: torch.tensor(0.0).share_memory_()
         for k in Info._fields for stat_k in ['avg', 'min', 'max']
@@ -168,6 +169,7 @@ if __name__ == "__main__":
         weights_available=weights_available,
         ep_info_dict=ep_info_dict,
         queue_util=queue_util,
+        wait_time=wait_time,
         kwargs=kwargs,
     )
     # after starting simulation thread, workers asynchronously interact with
@@ -177,9 +179,11 @@ if __name__ == "__main__":
     shm_tensor_dict = {}
     for k, shp in SHAPES.items():
         if 'rnn_hidden' in k:
-            shm_tensor_dict[k] = torch.zeros(shp[0], config.batch_size, *shp[1:]).to(**learner.tpdv)
+            shm_tensor_dict[k] = torch.zeros((shp[0], config.batch_size, *shp[1:]),
+                                             dtype=getattr(torch, DTYPES[k].__name__)).to(device=learner.device)
         else:
-            shm_tensor_dict[k] = torch.zeros(config.chunk_len, config.batch_size, *shp).to(**learner.tpdv)
+            shm_tensor_dict[k] = torch.zeros((config.chunk_len, config.batch_size, *shp),
+                                             dtype=getattr(torch, DTYPES[k].__name__)).to(device=learner.device)
 
     # main loop
     global_step = 0
@@ -231,6 +235,7 @@ if __name__ == "__main__":
                 'buffer/received_sample': buffer.get_received_sample(),
                 'buffer/consumed_sample': num_frames / kwargs['chunk_len'],
                 'buffer/ready_id_queue_util': queue_util.item(),
+                'buffer/ray_wait_time': wait_time.item(),
             }
 
             # write summary into weights&biases

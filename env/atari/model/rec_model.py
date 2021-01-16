@@ -52,7 +52,7 @@ class ActorCritic(nn.Module):
     @torch.no_grad()
     def select_action(self, obs, rnn_hidden):
         assert not self.is_training
-        obs = torch.from_numpy(obs)
+        obs = torch.from_numpy(obs).to(torch.float32) / 255
         rnn_hidden = torch.from_numpy(rnn_hidden).transpose(0, 1)
         x = self.feature_net(obs).unsqueeze(0)
         h0, c0 = torch.split(rnn_hidden, self.hidden_dim, -1)
@@ -66,6 +66,7 @@ class ActorCritic(nn.Module):
         return action.numpy(), action_logits.numpy(), value.numpy(), h_out.numpy()
 
     def compute_loss(self, obs, action, action_logits, adv, value, value_target, pad_mask, rnn_hidden):
+        obs = obs.to(torch.float32) / 255
         action = action.to(torch.long)
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 

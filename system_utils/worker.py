@@ -1,4 +1,5 @@
 import ray
+import time
 
 
 @ray.remote(num_cpus=1)
@@ -74,7 +75,9 @@ class RolloutCollector:
         # iteratively make worker active
         self._start()
         while True:
+            start = time.time()
             [ready_sample_job], self.working_jobs = ray.wait(self.working_jobs, num_returns=1)
+            wait_time = time.time() - start
 
             worker_id, ready_info_job = self.job_hashing[ready_sample_job]
             self.job_hashing.pop(ready_sample_job)
@@ -82,7 +85,7 @@ class RolloutCollector:
             new_sample_job, new_info_job = self.workers[worker_id].get.remote()
             self.working_jobs.append(new_sample_job)
             self.job_hashing[new_sample_job] = (worker_id, new_info_job)
-            yield ready_sample_job, ready_info_job
+            yield ready_sample_job, ready_info_job, wait_time
 
     def get_sample_ids(self):
         return next(self._data_id_g)

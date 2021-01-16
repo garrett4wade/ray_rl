@@ -19,12 +19,11 @@ class Ray2ProcessSender:
         self.id = sender_id
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REQ)
-        self.socket.bind('ipc:///dev/shm/ray2proc')
+        self.socket.bind('ipc:///dev/shm/ray2proc_' + str(sender_id))
         self.ready_id_queue = ready_id_queue
 
     def send_seg(self, seg, flags=0, copy=True, track=False):
-        data = np.concatenate([x.reshape(-1) for x in seg])
-        del seg
+        data = np.concatenate([x.reshape(-1) for x in seg]).astype(np.float32)
         return self.socket.send(data, flags, copy=copy, track=track)
 
     def run(self):
@@ -34,7 +33,7 @@ class Ray2ProcessSender:
             self.socket.recv()
 
 
-def receive_and_put(receiver_id, buffer, port=257894, flags=0, copy=True, track=False):
+def receive_and_put(receiver_id, buffer, flags=0, copy=True, track=False):
     os.setpriority(os.PRIO_PROCESS, os.getpid(), 1)
     Seg = namedtuple('Seg', list(buffer.shapes.keys()))
     datalen_per_batch = 0
@@ -46,7 +45,7 @@ def receive_and_put(receiver_id, buffer, port=257894, flags=0, copy=True, track=
 
     context = zmq.Context()
     socket = context.socket(zmq.REP)
-    socket.connect('ipc:///dev/shm/ray2proc')
+    socket.connect('ipc:///dev/shm/ray2proc_' + str(receiver_id))
     while True:
         msg = socket.recv(flags=flags, copy=copy, track=track)
         buf = memoryview(msg)
@@ -81,8 +80,8 @@ def receive_and_put(receiver_id, buffer, port=257894, flags=0, copy=True, track=
 
 
 class SimulationSupervisor(mp.Process):
-    def __init__(self, rollout_keys, collect_keys, model_fn, worker_env_fn, global_buffer, weights,
-                 weights_available, ep_info_dict, queue_util, kwargs):
+    def __init__(self, rollout_keys, collect_keys, model_fn, worker_env_fn, global_buffer, weights, weights_available,
+                 ep_info_dict, queue_util, wait_time, kwargs):
         super().__init__()
         self.rollout_keys = rollout_keys
         self.collect_keys = collect_keys
@@ -93,9 +92,11 @@ class SimulationSupervisor(mp.Process):
         self.weights_available = weights_available
         self.ep_info_dict = ep_info_dict
         self.queue_util = queue_util
+        self.wait_time = wait_time
         self.kwargs = kwargs
 
         self.history_info = []
+        self.wait_times = []
 
     def run(self):
         initialize_ray_on_supervisor(self.kwargs)
@@ -124,6 +125,9 @@ class SimulationSupervisor(mp.Process):
                 upload_job = self.ps.set_weights.remote(deepcopy(self.weights))
                 self.weights_available.copy_(torch.tensor(0))
                 self.queue_util.copy_(torch.tensor(self.ready_id_queue.qsize() / (4 * self.kwargs['num_workers'])))
+                if len(self.wait_times) > 0:
+                    self.wait_time.copy_(torch.tensor(np.mean(self.wait_times)))
+                    self.wait_times = []
                 if len(self.history_info) > 0:
                     for k in self.history_info[0]._fields:
                         self.ep_info_dict[k + '/avg'].copy_(
@@ -136,6 +140,7 @@ class SimulationSupervisor(mp.Process):
 
     def sample_from_rollout_collector(self):
         while True:
-            ready_seg_id, ready_info_id = self.rollout_collector.get_sample_ids()
+            ready_seg_id, ready_info_id, wait_time = self.rollout_collector.get_sample_ids()
             self.ready_id_queue.put(ready_seg_id)
             self.history_info += ray.get(ready_info_id)
+            self.wait_times.append(wait_time)
