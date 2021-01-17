@@ -129,8 +129,9 @@ class SharedCircularBuffer:
         batch_size = data_batch[0].shape[1]
 
         t1 = time.time()
-        self._read_ready.acquire()
         try:
+            self._read_ready.acquire()
+            tw = time.time()
             indices = np.nonzero(self.is_free)[0][:batch_size]
             self.is_free[indices] = 0
             if len(indices) < batch_size:
@@ -159,8 +160,8 @@ class SharedCircularBuffer:
         finally:
             self._read_ready.release()
         t4 = time.time()
-        print("PUT preprocess time: {:.2f}ms, copy time: {:.2f}ms, postprocess time: {:.2f}ms".format(
-            1e3 * (t2 - t1), 1e3 * (t3 - t2), 1e3 * (t4 - t3)))
+        print("PUT wait time: {:.2f}ms | preprocess time: {:.2f}ms | copy time: {:.2f}ms | postprocess time: {:.2f}ms".
+              format(1e3 * (tw - t1), 1e3 * (t2 - tw), 1e3 * (t3 - t2), 1e3 * (t4 - t3)))
 
     def get(self, target_shm_tensor_dict):
         import time
@@ -196,9 +197,8 @@ class SharedCircularBuffer:
             # assert np.all(self.is_ready + self.is_busy + self.is_free)
             self._read_ready.release()
         t4 = time.time()
-        print(
-            "GET preprocess time: {:.2f}ms, copy time: {:.2f}ms, postprocess time: {:.2f}ms, wait time {:.2f}ms".format(
-                1e3 * (t2 - t1), 1e3 * (t3 - t2), 1e3 * (t4 - t3), 1e3 * (tw - t1)))
+        print("GET wait time: {:.2f}ms | preprocess time: {:.2f}ms | copy time: {:.2f}ms | postprocess time: {:.2f}ms".
+              format(1e3 * (tw - t1), 1e3 * (t2 - tw), 1e3 * (t3 - t2), 1e3 * (t4 - t3)))
 
     def get_util(self):
         return self.size() / self.maxsize

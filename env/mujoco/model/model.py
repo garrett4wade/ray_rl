@@ -18,8 +18,8 @@ class ActorCritic(nn.Module):
         else:
             self.device = torch.device(config.gpu_id if torch.cuda.is_available() else 'cpu')
 
-        action_scale = torch.from_numpy(config.action_scale.copy())
-        action_loc = torch.from_numpy(config.action_loc.copy())
+        action_scale = torch.tensor(config.action_scale.copy())
+        action_loc = torch.tensor(config.action_loc.copy())
         self.action_scale = nn.Parameter(action_scale).detach().to(self.device)
         self.action_loc = nn.Parameter(action_loc).detach().to(self.device)
 

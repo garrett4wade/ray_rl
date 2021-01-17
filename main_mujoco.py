@@ -59,8 +59,7 @@ parser.add_argument('--q_size', type=int, default=8, help='number of batches in 
 # random seed
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 
-args = parser.parse_args()
-kwargs = vars(args)
+config = parser.parse_args()
 
 
 def build_simple_env(config, seed=0):
@@ -91,37 +90,34 @@ def build_learner_model(config):
 
 
 # get state/action information from env
-init_env = build_simple_env(args)
-kwargs['obs_dim'] = init_env.observation_space.shape[0]
-kwargs['action_dim'] = init_env.action_space.shape[0]
+init_env = build_simple_env(config)
+config.obs_dim = init_env.observation_space.shape[0]
+config.action_dim = init_env.action_space.shape[0]
 high = init_env.action_space.high
 low = init_env.action_space.low
-kwargs['action_loc'] = (high + low) / 2
-kwargs['action_scale'] = (high - low) / 2
-kwargs['continuous_env'] = True
+config.action_loc = (high + low) / 2
+config.action_scale = (high - low) / 2
+config.continuous_env = True
 del init_env
 
-SHAPES = get_shapes(args)
+SHAPES = get_shapes(config)
 
 if __name__ == "__main__":
     exp_start_time = time.time()
     os.setpriority(os.PRIO_PROCESS, os.getpid(), 0)
 
     # set random seed
-    torch.manual_seed(kwargs['seed'])
-    np.random.seed(kwargs['seed'] + 13563)
+    torch.manual_seed(config.seed)
+    np.random.seed(config.seed + 13563)
 
-    if args.no_summary:
-        config = args
-    else:
+    if not config.no_summary:
         # initialized weights&biases summary
         run = wandb.init(project='distributed rl',
-                         group=kwargs['wandb_group'],
-                         job_type=kwargs['wandb_job'],
-                         name=kwargs['exp_name'],
+                         group=config.wandb_group,
+                         job_type=config.wandb_job,
+                         name=config.exp_name,
                          entity='garrett4wade',
-                         config=kwargs)
-        config = wandb.config
+                         config=vars(config))
 
     runner = Runner(learner_model_fn=build_learner_model,
                     worker_model_fn=build_worker_model,
@@ -135,7 +131,7 @@ if __name__ == "__main__":
                     config=config)
     runner.run()
 
-    if not args.no_summary:
+    if not config.no_summary:
         run.finish()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
     ray.shutdown()
