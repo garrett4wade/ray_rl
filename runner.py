@@ -136,7 +136,7 @@ class Runner:
         buffer_stat = {
             'buffer/utilization': self.buffer.get_util(),
             'buffer/received_sample': self.buffer.get_received_sample(),
-            'buffer/consumed_sample': self.num_frames / self.chunk_len,
+            'buffer/consumed_sample': self.num_frames / self.config.chunk_len,
             'buffer/ready_id_queue_util': self.queue_util.item(),
             'buffer/ray_wait_time': self.wait_time.item(),
         }

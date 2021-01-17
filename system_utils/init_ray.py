@@ -29,5 +29,5 @@ def initialize_ray_on_supervisor(config):
     if config.cluster:
         ray.init(address='auto', include_dashboard=config.ray_dashboard)
     else:
-        ray.init(num_cpus=num_cpus, include_dashboard=config.ray_dashboard)
+        ray.init(num_cpus=num_cpus, include_dashboard=config.ray_dashboard, resources={'head': 1000})
         print("Ray utilized cpu number: {}".format(num_cpus))

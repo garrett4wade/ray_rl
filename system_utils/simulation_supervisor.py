@@ -13,7 +13,7 @@ from system_utils.init_ray import initialize_ray_on_supervisor
 from system_utils.parameter_server import ParameterServer
 
 
-@ray.remote(num_cpus=0.5)
+@ray.remote(num_cpus=0.2, resources={'head': 1})
 class Ray2ProcessSender:
     def __init__(self, sender_id, ready_id_queue):
         self.id = sender_id
