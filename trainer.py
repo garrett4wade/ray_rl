@@ -121,12 +121,12 @@ class Trainer:
             iter_dur = time.time() - iter_start
 
             return_stat = {k: v.item() for k, v in self.ep_info_dict.items()}
-            print("-" * 50)
-            print(("Process: {}, Global Step: {}, Frames: {}, " + "Average Return: {:.2f}, " +
-                   "Sample Time: {:.2f}s, " + "Optimization Time: {:.2f}s, " + "Iteration Step Time: {:.2f}s").format(
-                       self.rank, self.global_step, self.num_frames, return_stat['ep_return/avg'], sample_time,
-                       optimize_time, iter_dur))
-            print("-" * 50)
+            print("Process: {:1d} | ".format(self.rank) + "Global Step: {: >5d} | ".format(self.global_step) +
+                  "Frames: {: >10d} | ".format(self.num_frames) +
+                  "Average Return: {: >8.2f} | ".format(return_stat['ep_return/avg']) +
+                  "Sample Time: {: >6.2f}s | ".format(sample_time) +
+                  "Optimization Time: {: >6.2f}s | ".format(optimize_time) +
+                  "Iteration Step Time: {: >6.2f}s".format(iter_dur))
 
             if self.rank == 0 and not self.config.no_summary:
                 self.summary(loss_stat, return_stat, sample_time, optimize_time, iter_dur)
