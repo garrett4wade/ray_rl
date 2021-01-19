@@ -71,6 +71,9 @@ class Trainer:
         self.num_frames = 0
         self.global_step = 0
 
+    def teardown(self):
+        dist.destroy_process_group()
+
     def train_learner_on_batch(self):
         self.optimizer.zero_grad()
         v_loss, p_loss, entropy_loss = self.loss_fn(self.learner, clip_ratio=self.config.clip_ratio, **self.tensor_dict)
@@ -127,6 +130,7 @@ class Trainer:
 
             if self.rank == 0 and not self.config.no_summary:
                 self.summary(loss_stat, return_stat, sample_time, optimize_time, iter_dur)
+        self.teardown()
         if self.rank == 0 and not self.config.no_summary:
             self.wandb_exp.finish()
 
