@@ -9,8 +9,8 @@ class ActorCritic(nn.Module):
     def __init__(self, is_training, config):
         super().__init__()
         self.is_training = is_training
-        self.action_dim = action_dim = config.action_dim
-        self.hidden_dim = hidden_dim = config.hidden_dim
+        action_dim = config.action_dim
+        hidden_dim = config.hidden_dim
 
         # default convolutional model in rllib
         self.feature_net = nn.Sequential(
@@ -30,12 +30,11 @@ class ActorCritic(nn.Module):
         # critic
         self.value_layer = nn.Linear(hidden_dim, 1)
 
-        self.clip_ratio = config.clip_ratio
-
     def forward(self, obs, rnn_hidden):
         t, b, c, h, w = obs.shape
-        h0, c0 = torch.split(rnn_hidden, self.hidden_dim, -1)
-        x = self.feature_net(obs.view(t * b, c, h, w)).reshape(t, b, self.hidden_dim)
+        hidden_dim = rnn_hidden.shape[-1] // 2
+        h0, c0 = torch.split(rnn_hidden, hidden_dim, -1)
+        x = self.feature_net(obs.view(t * b, c, h, w)).reshape(t, b, hidden_dim)
         x, (h1, c1) = self.rnn(x, (h0.contiguous(), c0.contiguous()))
         h_out = torch.cat((h1, c1), dim=-1)
         action_logits = self.action_layer(x)
@@ -48,7 +47,7 @@ class ActorCritic(nn.Module):
         obs = torch.from_numpy(obs).to(torch.float32) / 255
         rnn_hidden = torch.from_numpy(rnn_hidden).transpose(0, 1)
         x = self.feature_net(obs).unsqueeze(0)
-        h0, c0 = torch.split(rnn_hidden, self.hidden_dim, -1)
+        h0, c0 = torch.split(rnn_hidden, rnn_hidden.shape[-1] // 2, -1)
         x, (h1, c1) = self.rnn(x, (h0.contiguous(), c0.contiguous()))
         x = x.squeeze_(0)
         h_out = torch.cat((h1, c1), dim=-1).transpose(0, 1)
@@ -58,29 +57,27 @@ class ActorCritic(nn.Module):
         action = Categorical(logits=action_logits).sample()
         return action.numpy(), action_logits.numpy(), value.numpy(), h_out.numpy()
 
-    def compute_loss(self, obs, action, action_logits, adv, value, value_target, pad_mask, rnn_hidden):
-        obs = obs.to(torch.float32) / 255
-        action = action.to(torch.long)
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-        target_action_logits, cur_state_value, _ = self(obs, rnn_hidden)
+def compute_loss(ddp_learner, obs, action, action_logits, adv, value, value_target, pad_mask, rnn_hidden, clip_ratio):
+    obs = obs.to(torch.float32) / 255
+    action = action.to(torch.long)
+    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-        target_dist = Categorical(logits=target_action_logits)
-        target_action_logprobs = target_dist.log_prob(action)
-        behavior_action_logprobs = Categorical(logits=action_logits).log_prob(action)
+    target_action_logits, cur_state_value, _ = ddp_learner(obs, rnn_hidden)
 
-        log_rhos = target_action_logprobs - behavior_action_logprobs.detach()
-        rhos = log_rhos.exp()
+    target_dist = Categorical(logits=target_action_logits)
+    target_action_logprobs = target_dist.log_prob(action)
+    behavior_action_logprobs = Categorical(logits=action_logits).log_prob(action)
 
-        p_surr = adv * torch.clamp(rhos, 1 - self.clip_ratio, 1 + self.clip_ratio)
-        p_loss = (-torch.min(p_surr, rhos * adv) * pad_mask).mean()
+    log_rhos = target_action_logprobs - behavior_action_logprobs.detach()
+    rhos = log_rhos.exp()
 
-        cur_v_clipped = value + torch.clamp(cur_state_value - value, -self.clip_ratio, self.clip_ratio)
-        v_loss = torch.max(F.mse_loss(cur_state_value, value_target), F.mse_loss(cur_v_clipped, value_target))
-        v_loss = (v_loss * pad_mask).mean()
+    p_surr = adv * torch.clamp(rhos, 1 - clip_ratio, 1 + clip_ratio)
+    p_loss = (-torch.min(p_surr, rhos * adv) * pad_mask).mean()
 
-        entropy_loss = (-target_dist.entropy() * pad_mask).mean()
-        return v_loss, p_loss, entropy_loss
+    cur_v_clipped = value + torch.clamp(cur_state_value - value, -clip_ratio, clip_ratio)
+    v_loss = torch.max(F.mse_loss(cur_state_value, value_target), F.mse_loss(cur_v_clipped, value_target))
+    v_loss = (v_loss * pad_mask).mean()
 
-    def get_weights(self):
-        return {k: v.cpu() for k, v in self.state_dict().items()}
+    entropy_loss = (-target_dist.entropy() * pad_mask).mean()
+    return v_loss, p_loss, entropy_loss

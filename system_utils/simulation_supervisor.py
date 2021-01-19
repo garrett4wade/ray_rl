@@ -144,3 +144,7 @@ class SimulationSupervisor(mp.Process):
             self.ready_id_queue.put(ready_seg_id)
             self.history_info += ray.get(ready_info_id)
             self.wait_times.append(wait_time)
+
+    def terminate(self):
+        ray.shutdown()
+        super().terminate()

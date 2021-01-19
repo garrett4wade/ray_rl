@@ -18,9 +18,8 @@ do
                             --seed ${seed} \
                             --env_num ${num_env} \
                             --num_workers ${num_worker} \
-                            --gpu_id 1 \
                             --min_return_chunk_num 16 \
-                            --batch_size 512 \
+                            --batch_size 128 \
                             --q_size 16 \
                             --num_writers 2 \
                             --no_summary

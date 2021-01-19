@@ -19,9 +19,8 @@ do
                             --env_num ${num_env} \
                             --num_workers ${num_worker} \
                             --min_return_chunk_num 64 \
-                            --batch_size 10240 \
-                            --num_writers 1 \
-                            --no_summary
+                            --batch_size 2560 \
+                            --num_writers 1
     pkill -9 ray
     pkill -9 python3.8
     rm -rf /dev/shm/*

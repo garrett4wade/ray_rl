@@ -1,16 +1,16 @@
 import os
 import gym
-import ray
 import time
-import wandb
 import argparse
 import numpy as np
 
 import torch
+import torch.multiprocessing as mp
 from env.mujoco.env_with_memory import EnvWithMemory, VecEnvWithMemory
-from env.mujoco.model.model import ActorCritic
-from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Seg, Info
-from runner import Runner
+from env.mujoco.model.model import ActorCritic, compute_loss
+from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Info
+from rollout_runner import RolloutRunner
+from trainer import Trainer
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
@@ -18,7 +18,7 @@ parser.add_argument("--exp_name", type=str, default='ray_test0', help='experimen
 parser.add_argument("--wandb_group", type=str, default='mujoco', help='weights & biases group name')
 parser.add_argument("--wandb_job", type=str, default='run 100M', help='weights & biases job name')
 parser.add_argument("--no_summary", action='store_true', help='whether to write summary')
-parser.add_argument('--gpu_id', type=int, default=0, help='gpu id')
+parser.add_argument('--num_gpus', type=int, default=4, help='utilized gpu num')
 parser.add_argument('--verbose', action='store_true', help='whether to output debug imformation')
 parser.add_argument('--cluster', action='store_true', help='whether running on cluster')
 
@@ -110,28 +110,43 @@ if __name__ == "__main__":
     torch.manual_seed(config.seed)
     np.random.seed(config.seed + 13563)
 
-    if not config.no_summary:
-        # initialized weights&biases summary
-        run = wandb.init(project='distributed rl',
-                         group=config.wandb_group,
-                         job_type=config.wandb_job,
-                         name=config.exp_name,
-                         entity='garrett4wade',
-                         config=vars(config))
+    # learner prototype is used for initializing worker models and learner DDP model
+    # it will never be trained
+    learner_prototype = build_learner_model(config)
 
-    runner = Runner(learner_model_fn=build_learner_model,
-                    worker_model_fn=build_worker_model,
-                    worker_env_fn=build_worker_env,
-                    rollout_keys=ROLLOUT_KEYS,
-                    collect_keys=COLLECT_KEYS,
-                    info_fn=Info,
-                    seg_fn=Seg,
-                    shapes=SHAPES,
-                    dtypes=DTYPES,
-                    config=config)
-    runner.run()
+    # initialize Ray based remote rollout workers
+    init_weights = learner_prototype.state_dict()
+    rollout_runner = RolloutRunner(init_weights=init_weights,
+                                   worker_model_fn=build_worker_model,
+                                   worker_env_fn=build_worker_env,
+                                   rollout_keys=ROLLOUT_KEYS,
+                                   collect_keys=COLLECT_KEYS,
+                                   ep_info_keys=Info._fields,
+                                   shapes=SHAPES,
+                                   dtypes=DTYPES,
+                                   config=config)
+    rollout_runner.run()
 
-    if not config.no_summary:
-        run.finish()
+    # initialize trainer for each GPU and start DDP training
+    trainers = [
+        Trainer(rank=i,
+                world_size=config.num_gpus,
+                model=learner_prototype,
+                loss_fn=compute_loss,
+                buffer=rollout_runner.buffer,
+                global_weights=rollout_runner.global_weights,
+                weights_available=rollout_runner.weights_available,
+                ep_info_dict=rollout_runner.ep_info_dict,
+                queue_util=rollout_runner.queue_util,
+                wait_time=rollout_runner.wait_time,
+                config=config) for i in range(config.num_gpus)
+    ]
+    jobs = [mp.Process(target=trainer.run) for trainer in trainers]
+    for job in jobs:
+        job.start()
+    for job in jobs:
+        job.join()
+
+    # terminate rollout workers
+    rollout_runner.shutdown()
     print("Experiment Time Consume: {}".format(time.time() - exp_start_time))
-    ray.shutdown()

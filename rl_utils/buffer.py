@@ -1,5 +1,7 @@
-import numpy as np
+import time
 import random
+import numpy as np
+from collections import namedtuple
 from torch import from_numpy
 from multiprocessing.managers import SharedMemoryManager
 from multiprocessing import Lock, Condition
@@ -70,13 +72,15 @@ class CircularBuffer:
 
 
 class SharedCircularBuffer:
-    def __init__(self, maxsize, chunk_len, reuse_times, shapes, dtypes, produced_batch_size, seg_fn):
+    def __init__(self, maxsize, chunk_len, reuse_times, shapes, dtypes, num_gpus, bs_per_gpu, verbose_time=False):
         self.reuse_times = reuse_times
         self.maxsize = maxsize
         self.chunk_len = chunk_len
-        self.produced_batch_size = produced_batch_size
+        self.bs_per_gpu = bs_per_gpu
+        self.num_read_proc = num_gpus
         self.shapes = shapes
         self.dtypes = dtypes
+        self.verbose_time = verbose_time
 
         self._read_ready = Condition(Lock())
 
@@ -99,7 +103,7 @@ class SharedCircularBuffer:
                 _storage_shm = self._smm.SharedMemory(size=byte_per_digit * maxsize * np.prod(shp))
                 storage.append(np.ndarray((shp[0], maxsize, *shp[1:]), dtype=dtypes[k], buffer=_storage_shm.buf))
             self._storage_shms.append(_storage_shm)
-        self.storage = seg_fn(*storage)
+        self.storage = namedtuple('Seg', list(self.shapes.keys()))(*storage)
 
         self._used_times_shm = self._smm.SharedMemory(size=maxsize)
         self.used_times = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._used_times_shm.buf)
@@ -125,7 +129,6 @@ class SharedCircularBuffer:
         return self.size()
 
     def put(self, data_batch):
-        import time
         batch_size = data_batch[0].shape[1]
 
         t1 = time.time()
@@ -155,22 +158,24 @@ class SharedCircularBuffer:
             self.is_ready[indices] = 1
             self.received_sample += batch_size
             # assert np.all(self.is_ready + self.is_busy + self.is_free)
-            if np.sum(self.is_ready) >= self.produced_batch_size:
-                self._read_ready.notify(1)
+            if np.sum(self.is_ready) >= self.bs_per_gpu * self.num_read_proc:
+                self._read_ready.notify(self.num_read_proc)
         finally:
             self._read_ready.release()
         t4 = time.time()
-        print("PUT wait time: {:.2f}ms | preprocess time: {:.2f}ms | copy time: {:.2f}ms | postprocess time: {:.2f}ms".
-              format(1e3 * (tw - t1), 1e3 * (t2 - tw), 1e3 * (t3 - t2), 1e3 * (t4 - t3)))
+        if self.verbose_time:
+            print(("PUT wait time: {:.2f}ms | " + "preprocess time: {:.2f}ms | " + "copy time: {:.2f}ms | " +
+                   "postprocess time: {:.2f}ms").format(1e3 * (tw - t1), 1e3 * (t2 - tw), 1e3 * (t3 - t2),
+                                                        1e3 * (t4 - t3)))
 
     def get(self, target_shm_tensor_dict):
         import time
         t1 = time.time()
         try:
             self._read_ready.acquire()
-            self._read_ready.wait_for(lambda: np.sum(self.is_ready) >= self.produced_batch_size)
+            self._read_ready.wait_for(lambda: np.sum(self.is_ready) >= self.bs_per_gpu * self.num_read_proc)
             tw = time.time()
-            indices = np.random.choice(np.nonzero(self.is_ready)[0], self.produced_batch_size, replace=False)
+            indices = np.random.choice(np.nonzero(self.is_ready)[0], self.bs_per_gpu, replace=False)
             self.is_busy[indices] = 1
             self.is_ready[indices] = 0
         finally:
@@ -197,8 +202,10 @@ class SharedCircularBuffer:
             # assert np.all(self.is_ready + self.is_busy + self.is_free)
             self._read_ready.release()
         t4 = time.time()
-        print("GET wait time: {:.2f}ms | preprocess time: {:.2f}ms | copy time: {:.2f}ms | postprocess time: {:.2f}ms".
-              format(1e3 * (tw - t1), 1e3 * (t2 - tw), 1e3 * (t3 - t2), 1e3 * (t4 - t3)))
+        if self.verbose_time:
+            print(("GET wait time: {:.2f}ms | " + "preprocess time: {:.2f}ms | " + "copy time: {:.2f}ms | " +
+                   "postprocess time: {:.2f}ms").format(1e3 * (tw - t1), 1e3 * (t2 - tw), 1e3 * (t3 - t2),
+                                                        1e3 * (t4 - t3)))
 
     def get_util(self):
         return self.size() / self.maxsize
