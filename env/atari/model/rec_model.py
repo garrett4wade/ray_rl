@@ -9,11 +9,6 @@ class ActorCritic(nn.Module):
     def __init__(self, is_training, config):
         super().__init__()
         self.is_training = is_training
-        if not is_training:
-            self.device = torch.device('cpu')
-        else:
-            self.device = torch.device(config.gpu_id if torch.cuda.is_available() else 'cpu')
-
         self.action_dim = action_dim = config.action_dim
         self.hidden_dim = hidden_dim = config.hidden_dim
 
@@ -36,8 +31,6 @@ class ActorCritic(nn.Module):
         self.value_layer = nn.Linear(hidden_dim, 1)
 
         self.clip_ratio = config.clip_ratio
-        self.tpdv = dict(device=self.device, dtype=torch.float32)
-        self.to(self.device)
 
     def forward(self, obs, rnn_hidden):
         t, b, c, h, w = obs.shape

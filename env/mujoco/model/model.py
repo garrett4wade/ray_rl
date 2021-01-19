@@ -13,21 +13,16 @@ class ActorCritic(nn.Module):
     def __init__(self, is_training, config):
         super().__init__()
         self.is_training = is_training
-        if not is_training:
-            self.device = torch.device('cpu')
-        else:
-            self.device = torch.device(config.gpu_id if torch.cuda.is_available() else 'cpu')
-
         action_scale = torch.tensor(config.action_scale.copy())
         action_loc = torch.tensor(config.action_loc.copy())
-        self.action_scale = nn.Parameter(action_scale).detach().to(self.device)
-        self.action_loc = nn.Parameter(action_loc).detach().to(self.device)
+        self.action_scale = nn.Parameter(action_scale).detach()
+        self.action_loc = nn.Parameter(action_loc).detach()
 
         obs_dim = config.obs_dim
         action_dim = config.action_dim
         hidden_dim = config.hidden_dim
-
         self.action_dim = config.action_dim
+
         self.feature_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.LayerNorm(normalized_shape=[hidden_dim]),
                                          nn.ReLU(), nn.Linear(hidden_dim, hidden_dim),
                                          nn.LayerNorm(normalized_shape=[hidden_dim]), nn.ReLU())
@@ -35,10 +30,7 @@ class ActorCritic(nn.Module):
         self.action_layer = nn.Linear(hidden_dim, 2 * action_dim)
         # critic
         self.value_layer = nn.Linear(hidden_dim, 1)
-
         self.clip_ratio = config.clip_ratio
-        self.tpdv = dict(device=self.device, dtype=torch.float32)
-        self.to(self.device)
 
     def core(self, state):
         return self.feature_net(state)
