@@ -50,7 +50,6 @@ parser.add_argument('--min_return_chunk_num', type=int, default=64, help='minima
 
 # Ray distributed training parameters
 parser.add_argument('--ray_dashboard', action='store_true', help='use ray dashboard')
-parser.add_argument('--num_collectors', type=int, default=4, help='# of buffer collectors')
 parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
@@ -103,6 +102,8 @@ SHAPES = get_shapes(config)
 if __name__ == "__main__":
     exp_start_time = time.time()
     os.setpriority(os.PRIO_PROCESS, os.getpid(), 0)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = True
 
     # set random seed
     torch.manual_seed(config.seed)
