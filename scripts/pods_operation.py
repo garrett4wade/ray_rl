@@ -1,3 +1,4 @@
+import os
 import subprocess
 import argparse
 from collections import namedtuple
@@ -19,6 +20,9 @@ if __name__ == "__main__":
     if args.copy:
         # copy codes to pods
         for pod in pods:
-            subprocess.Popen(['kubectl', 'exec', '-it', pod.name, '--', 'rm', '-rf', '/ray_rl']).wait()
-            subprocess.Popen(['kubectl', 'cp', '..', pod.name + ':/ray_rl']).wait()
-            print('finishing copy onto {}'.format(pod))
+            if pod.status == 'Running':
+                os.system('kubectl exec -it {} -- rm -rf /ray_rl'.format(pod.name))
+                os.system('kubectl cp ~/workspace/ray_rl {}:/ray_rl'.format(pod.name))
+                print('finishing copy onto {}'.format(pod))
+            else:
+                print("pod {} is not running yet, ignore copy onto this pod".format(pod))
