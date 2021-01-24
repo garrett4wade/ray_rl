@@ -23,6 +23,9 @@ if __name__ == "__main__":
             if pod.status == 'Running':
                 os.system('kubectl exec -it {} -- rm -rf /ray_rl'.format(pod.name))
                 os.system('kubectl cp ~/workspace/ray_rl {}:/ray_rl'.format(pod.name))
-                print('finishing copy onto {}'.format(pod))
+                print('finished copy onto {}.'.format(pod.name))
             else:
-                print("pod {} is not running yet, ignore copy onto this pod".format(pod))
+                print("pod {} is not running yet, ignore copy onto this pod.".format(pod.name))
+
+    if not args.copy:
+        print("Nothing happens to your {} pods.".format(pods_num))
