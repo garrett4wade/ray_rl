@@ -27,5 +27,5 @@ if __name__ == "__main__":
             else:
                 print("pod {} is not running yet, ignore copy onto this pod.".format(pod.name))
 
-    if not args.copy:
+    if not any(vars(args).values()):
         print("Nothing happens to your {} pods.".format(pods_num))
