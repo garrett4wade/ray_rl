@@ -1,4 +1,3 @@
-import os
 import gym
 import time
 import argparse
@@ -104,7 +103,6 @@ SHAPES = get_shapes(config)
 
 if __name__ == "__main__":
     exp_start_time = time.time()
-    os.setpriority(os.PRIO_PROCESS, os.getpid(), 0)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = True
 

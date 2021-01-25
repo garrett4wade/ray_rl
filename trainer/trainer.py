@@ -43,6 +43,7 @@ class Trainer:
         if world_size == 1, set up simple trainer on single GPU,
         else set up PyTorch DDP trainer on corresponding GPU
         """
+        os.setpriority(os.PRIO_PROCESS, os.getpid(), 0)
         # initialized weights & biases summary
         if (self.rank == 0 or self.world_size == 1) and not self.config.no_summary:
             self.wandb_exp = wandb.init(project='distributed rl',
