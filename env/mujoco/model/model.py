@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from torch.distributions import Normal
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 # borrowed from soft-actor-critic
 LOG_STD_MAX = 2
@@ -56,19 +56,25 @@ class ActorCritic(nn.Module):
         return [result.numpy() for result in results]
 
 
-def compute_loss(ddp_learner, obs, action, action_logits, adv, value, value_target, pad_mask, clip_ratio):
+def compute_loss(learner, obs, action, action_logits, adv, value, value_target, pad_mask, clip_ratio):
+    if isinstance(learner, DDP):
+        action_scale = learner.module.action_scale
+        action_loc = learner.module.action_loc
+    else:
+        action_scale = learner.action_scale
+        action_loc = learner.action_loc
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-    _, target_action_logits, cur_state_value = ddp_learner(obs)
+    _, target_action_logits, cur_state_value = learner(obs)
 
     action_dim = action_logits.shape[-1] // 2
     target_mu, target_log_std = torch.split(target_action_logits, action_dim, dim=-1)
-    target_mu = torch.tanh(target_mu) * ddp_learner.module.action_scale + ddp_learner.module.action_loc
+    target_mu = torch.tanh(target_mu) * action_scale + action_loc
     target_log_std = target_log_std.clamp(LOG_STD_MIN, LOG_STD_MAX)
     target_dist = Normal(target_mu, target_log_std.exp())
     target_action_logprobs = target_dist.log_prob(action).sum(-1)
 
     mu, log_std = torch.split(action_logits, action_dim, dim=-1)
-    mu = torch.tanh(mu) * ddp_learner.module.action_scale + ddp_learner.module.action_loc
+    mu = torch.tanh(mu) * action_scale + action_loc
     log_std = log_std.clamp(LOG_STD_MIN, LOG_STD_MAX)
     behavior_dist = Normal(mu, log_std.exp())
     behavior_action_logprobs = behavior_dist.log_prob(action).sum(-1)

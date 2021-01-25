@@ -58,12 +58,12 @@ class ActorCritic(nn.Module):
         return action.numpy(), action_logits.numpy(), value.numpy(), h_out.numpy()
 
 
-def compute_loss(ddp_learner, obs, action, action_logits, adv, value, value_target, pad_mask, rnn_hidden, clip_ratio):
+def compute_loss(learner, obs, action, action_logits, adv, value, value_target, pad_mask, rnn_hidden, clip_ratio):
     obs = obs.to(torch.float32) / 255
     action = action.to(torch.long)
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-    target_action_logits, cur_state_value, _ = ddp_learner(obs, rnn_hidden)
+    target_action_logits, cur_state_value, _ = learner(obs, rnn_hidden)
 
     target_dist = Categorical(logits=target_action_logits)
     target_action_logprobs = target_dist.log_prob(action)

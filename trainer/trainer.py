@@ -39,26 +39,39 @@ class Trainer:
         self.wait_time = wait_time
 
     def setup(self):
-        os.environ['MASTER_ADDR'] = 'localhost'
-        os.environ['MASTER_PORT'] = '12355'
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(self.rank)
-        if self.rank == 0 and not self.config.no_summary:
-            # initialized weights&biases summary
+        """
+        if world_size == 1, set up simple trainer on single GPU,
+        else set up PyTorch DDP trainer on corresponding GPU
+        """
+        # initialized weights & biases summary
+        if (self.rank == 0 or self.world_size == 1) and not self.config.no_summary:
             self.wandb_exp = wandb.init(project='distributed rl',
                                         group=self.config.wandb_group,
                                         job_type=self.config.wandb_job,
                                         name=self.config.exp_name,
                                         entity='garrett4wade',
                                         config=vars(self.config))
-        # initialize the process group
-        dist.init_process_group("nccl", rank=self.rank, world_size=self.world_size)
-        print(f"Initializing DDP training on rank {self.rank}.")
-        # construct DDP model and optimizer
-        self.learner = DDP(deepcopy(self.learner_prototype).cuda())
+
+        # set up learner
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(self.rank)
+        if self.world_size > 1:
+            os.environ['MASTER_ADDR'] = 'localhost'
+            os.environ['MASTER_PORT'] = '12355'
+            # initialize the process group
+            dist.init_process_group("nccl", rank=self.rank, world_size=self.world_size)
+            print(f"Trainer Set Up: initializing DDP training on GPU rank {self.rank}.")
+            # construct DDP model
+            self.learner = DDP(deepcopy(self.learner_prototype).cuda())
+        else:
+            self.learner = self.learner_prototype.cuda()
+            print(f"Trainer Set Up: initializing training on single GPU rank {self.rank}.")
+
+        # set up optimizer
         if self.optimizer_nickname == 'adam':
             self.optimizer = torch.optim.Adam(self.learner.parameters(), lr=self.config.lr)
         else:
             raise NotImplementedError
+
         # pre-allocate cuda tensor to copy data from buffer
         self.tensor_dict = {}
         for k, shp in self.buffer.shapes.items():
@@ -72,7 +85,8 @@ class Trainer:
         self.global_step = 0
 
     def teardown(self):
-        dist.destroy_process_group()
+        if self.world_size > 1:
+            dist.destroy_process_group()
 
     def train_learner_on_batch(self):
         self.optimizer.zero_grad()
@@ -102,16 +116,17 @@ class Trainer:
 
             # broadcast updated learner parameters to each subprocess
             # then subprocess uploads them into remote parameter server
-            if self.rank == 0 and self.global_step % self.config.push_period == 0:
+            if (self.rank == 0 or self.world_size == 1) and self.global_step % self.config.push_period == 0:
                 new_weights = {k: v.cpu() for k, v in self.learner.state_dict().items()}
                 for k, v in new_weights.items():
                     self.global_weights[k.replace('module.', '')].copy_(v)
                 self.weights_available.copy_(torch.tensor(1))
 
-            dist.all_reduce_multigpu([v_loss])
-            dist.all_reduce_multigpu([p_loss])
-            dist.all_reduce_multigpu([entropy_loss])
-            dist.all_reduce_multigpu([grad_norm])
+            if self.world_size > 1:
+                dist.all_reduce_multigpu([v_loss])
+                dist.all_reduce_multigpu([p_loss])
+                dist.all_reduce_multigpu([entropy_loss])
+                dist.all_reduce_multigpu([grad_norm])
             loss_stat = {
                 'v_loss': v_loss.item(),
                 'p_loss': p_loss.item(),
@@ -128,10 +143,10 @@ class Trainer:
                   "Optimization Time: {: >6.2f}s | ".format(optimize_time) +
                   "Iteration Step Time: {: >6.2f}s".format(iter_dur))
 
-            if self.rank == 0 and not self.config.no_summary:
+            if (self.rank == 0 or self.world_size == 1) and not self.config.no_summary:
                 self.summary(loss_stat, return_stat, sample_time, optimize_time, iter_dur)
         self.teardown()
-        if self.rank == 0 and not self.config.no_summary:
+        if (self.rank == 0 or self.world_size == 1) and not self.config.no_summary:
             self.wandb_exp.finish()
 
     def summary(self, loss_stat, return_stat, sample_time, optimize_time, iter_dur):

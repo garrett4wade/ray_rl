@@ -12,6 +12,7 @@ from env.atari.model.rec_model import ActorCritic, compute_loss
 from env.atari.wrappers import WarpFrame, FrameStack
 from rollout_runner import RolloutRunner
 from trainer import Trainer
+from utils.find_free_gpu import find_free_gpu
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
@@ -127,8 +128,9 @@ if __name__ == "__main__":
     rollout_runner.run()
 
     # initialize trainer for each GPU and start DDP training
+    ranks = find_free_gpu(config.num_gpus)
     trainers = [
-        Trainer(rank=i,
+        Trainer(rank=rank,
                 world_size=config.num_gpus,
                 model=learner_prototype,
                 loss_fn=compute_loss,
@@ -138,7 +140,7 @@ if __name__ == "__main__":
                 ep_info_dict=rollout_runner.ep_info_dict,
                 queue_util=rollout_runner.queue_util,
                 wait_time=rollout_runner.wait_time,
-                config=config) for i in range(config.num_gpus)
+                config=config) for rank in ranks
     ]
     jobs = [mp.Process(target=trainer.run) for trainer in trainers]
     for job in jobs:
