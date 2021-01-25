@@ -8,7 +8,7 @@ import torch.multiprocessing as mp
 from env.mujoco.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from env.mujoco.model.model import ActorCritic, compute_loss
 from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Info
-from rollout_runner import RolloutRunner
+from system_utils.rollout_runner import RolloutRunner
 from trainer.trainer import Trainer
 from utils.find_free_gpu import find_free_gpu
 

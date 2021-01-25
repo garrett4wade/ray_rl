@@ -9,7 +9,7 @@ from env.atari.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from env.atari.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Info
 from env.atari.model.rec_model import ActorCritic, compute_loss
 from env.atari.wrappers import WarpFrame, FrameStack
-from rollout_runner import RolloutRunner
+from system_utils.rollout_runner import RolloutRunner
 from trainer import Trainer
 from utils.find_free_gpu import find_free_gpu
 
