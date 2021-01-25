@@ -128,7 +128,10 @@ if __name__ == "__main__":
     rollout_runner.run()
 
     # initialize trainer for each GPU and start DDP training
-    ranks = find_free_gpu(config.num_gpus)
+    if not config.cluster:
+        ranks = find_free_gpu(config.num_gpus)
+    else:
+        ranks = list(range(config.num_gpus))
     trainers = [
         Trainer(rank=rank,
                 world_size=config.num_gpus,
