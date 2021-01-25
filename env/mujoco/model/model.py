@@ -1,4 +1,5 @@
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
@@ -56,14 +57,27 @@ class ActorCritic(nn.Module):
         return [result.numpy() for result in results]
 
 
-def compute_loss(learner, obs, action, action_logits, adv, value, value_target, pad_mask, clip_ratio):
+def compute_loss(learner, obs, action, action_logits, adv, value, value_target, pad_mask, clip_ratio, world_size):
     if isinstance(learner, DDP):
+        assert world_size > 1
         action_scale = learner.module.action_scale
         action_loc = learner.module.action_loc
+        adv_mean = adv.mean()
+        adv_meansq = adv.pow(2).mean()
+
+        # all reduce to advantage mean & std
+        dist.all_reduce_multigpu([adv_mean])
+        dist.all_reduce_multigpu([adv_meansq])
+        adv_mean = adv_mean / world_size
+        adv_meansq = adv_meansq / world_size
+
+        adv_std = (adv_meansq - adv_mean.pow(2)).sqrt()
     else:
         action_scale = learner.action_scale
         action_loc = learner.action_loc
-    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+        adv_mean = adv.mean()
+        adv_std = adv.std(unbiased=False)
+    adv = (adv - adv_mean) / (adv_std + 1e-8)
     _, target_action_logits, cur_state_value = learner(obs)
 
     action_dim = action_logits.shape[-1] // 2

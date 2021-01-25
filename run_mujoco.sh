@@ -21,7 +21,8 @@ do
                             --min_return_chunk_num 64 \
                             --batch_size 2560 \
                             --num_writers 1 \
-                            --num_gpus 4
+                            --num_gpus 4 \
+                            --no_summary
     pkill -9 ray
     pkill -9 python3.8
     rm -rf /dev/shm/*

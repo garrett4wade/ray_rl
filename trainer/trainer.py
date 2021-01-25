@@ -91,7 +91,10 @@ class Trainer:
 
     def train_learner_on_batch(self):
         self.optimizer.zero_grad()
-        v_loss, p_loss, entropy_loss = self.loss_fn(self.learner, clip_ratio=self.config.clip_ratio, **self.tensor_dict)
+        v_loss, p_loss, entropy_loss = self.loss_fn(self.learner,
+                                                    clip_ratio=self.config.clip_ratio,
+                                                    world_size=self.world_size,
+                                                    **self.tensor_dict)
         loss = p_loss + self.config.value_coef * v_loss + self.config.entropy_coef * entropy_loss
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.learner.parameters(), self.config.max_grad_norm)
@@ -129,10 +132,10 @@ class Trainer:
                 dist.all_reduce_multigpu([entropy_loss])
                 dist.all_reduce_multigpu([grad_norm])
             loss_stat = {
-                'v_loss': v_loss.item(),
-                'p_loss': p_loss.item(),
-                'entropy_loss': entropy_loss.item(),
-                'grad_norm': grad_norm.item()
+                'v_loss': v_loss.item() / self.world_size,
+                'p_loss': p_loss.item() / self.world_size,
+                'entropy_loss': entropy_loss.item() / self.world_size,
+                'grad_norm': grad_norm.item() / self.world_size
             }
             iter_dur = time.time() - iter_start
 

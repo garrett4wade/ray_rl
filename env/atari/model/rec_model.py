@@ -1,8 +1,10 @@
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
 from torch.distributions import Categorical
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 class ActorCritic(nn.Module):
@@ -58,10 +60,26 @@ class ActorCritic(nn.Module):
         return action.numpy(), action_logits.numpy(), value.numpy(), h_out.numpy()
 
 
-def compute_loss(learner, obs, action, action_logits, adv, value, value_target, pad_mask, rnn_hidden, clip_ratio):
+def compute_loss(learner, obs, action, action_logits, adv, value, value_target, pad_mask, rnn_hidden, clip_ratio,
+                 world_size):
+    if isinstance(learner, DDP):
+        assert world_size > 1
+        adv_mean = adv.mean()
+        adv_meansq = adv.pow(2).mean()
+
+        # all reduce to advantage mean & std
+        dist.all_reduce_multigpu([adv_mean])
+        dist.all_reduce_multigpu([adv_meansq])
+        adv_mean = adv_mean / world_size
+        adv_meansq = adv_meansq / world_size
+
+        adv_std = (adv_meansq - adv_mean.pow(2)).sqrt()
+    else:
+        adv_mean = adv.mean()
+        adv_std = adv.std(unbiased=False)
+    adv = (adv - adv_mean) / (adv_std + 1e-8)
     obs = obs.to(torch.float32) / 255
     action = action.to(torch.long)
-    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
     target_action_logits, cur_state_value, _ = learner(obs, rnn_hidden)
 
