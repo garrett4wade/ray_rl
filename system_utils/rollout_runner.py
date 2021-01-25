@@ -17,7 +17,7 @@ class RolloutRunner:
         config,
     ):
         # initialize buffer
-        buffer_maxsize = config.batch_size * config.q_size
+        buffer_maxsize = config.batch_size * config.q_size * config.num_gpus
         self.buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times, shapes, dtypes,
                                            config.num_gpus, config.batch_size)
         self.shapes = shapes
@@ -29,7 +29,8 @@ class RolloutRunner:
         self.config = config
         # shared memory tensor for summary
         self.queue_util = torch.tensor(0.0).share_memory_()
-        self.wait_time = torch.tensor(0.0).share_memory_()
+        self.worker_wait_time = torch.tensor(0.0).share_memory_()
+        self.postprocessor_wait_time = torch.tensor(0.0).share_memory_()
         self.ep_info_dict = {
             k + '/' + stat_k: torch.tensor(0.0).share_memory_()
             for k in ep_info_keys for stat_k in ['avg', 'min', 'max']
@@ -48,7 +49,8 @@ class RolloutRunner:
                                                weights_available=self.weights_available,
                                                ep_info_dict=self.ep_info_dict,
                                                queue_util=self.queue_util,
-                                               wait_time=self.wait_time,
+                                               worker_wait_time=self.worker_wait_time,
+                                               postprocessor_wait_time=self.postprocessor_wait_time,
                                                config=self.config)
 
     def run(self):

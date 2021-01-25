@@ -49,9 +49,11 @@ class RolloutWorker:
         return next(self._data_g)
 
 
-class RolloutCollector:
-    def __init__(self, model_fn, worker_env_fn, ps, config):
-        self.num_workers = config.num_workers
+@ray.remote(num_cpus=0.1, resources={'head': 1})
+class RawdataCollector:
+    def __init__(self, num_workers, model_fn, worker_env_fn, ps, config):
+        # TODO: configure random seed (aka worker id) of worker env
+        self.num_workers = num_workers
         self.workers = [
             RolloutWorker.remote(worker_id=i, model_fn=model_fn, worker_env_fn=worker_env_fn, ps=ps, config=config)
             for i in range(self.num_workers)
@@ -61,9 +63,6 @@ class RolloutCollector:
         self.job_hashing = {}
 
         self._data_id_g = self._data_id_generator()
-        print("---------------------------------------------------")
-        print("              Workers starting ......              ")
-        print("---------------------------------------------------")
 
     def _start(self):
         for i in range(self.num_workers):
@@ -85,7 +84,7 @@ class RolloutCollector:
             new_sample_job, new_info_job = self.workers[worker_id].get.remote()
             self.working_jobs.append(new_sample_job)
             self.job_hashing[new_sample_job] = (worker_id, new_info_job)
-            yield ready_sample_job, ready_info_job, wait_time
+            yield ray.get(ready_sample_job), ray.get(ready_info_job), wait_time
 
     def get_sample_ids(self):
         return next(self._data_id_g)

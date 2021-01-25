@@ -1,12 +1,13 @@
 import numpy as np
-from scipy.signal import lfilter
-from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Seg, Info
+from collections import namedtuple
+from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, DTYPES, Info
 
 
 class EnvWithMemory:
     def __init__(self, env_fn, config):
         self.env = env_fn(config)
         self.shapes = get_shapes(config)
+        self.RolloutSegCls = namedtuple('RolloutSeg', ROLLOUT_KEYS)
 
         self.stored_chunk_num = 0
         self.history_ep_datas = []
@@ -52,13 +53,14 @@ class EnvWithMemory:
         self.history['action_logits'].append(action_logits)
         self.history['reward'].append(r)
         self.history['value'].append(value)
-        self.history['pad_mask'].append(1 - self.done)
 
         self.obs = n_obs
         self.done = d or self.ep_step >= self.max_timesteps
 
         if self.done:
-            self.history_ep_datas.append(self.collect())
+            seg = self.RolloutSegCls(**{k: np.stack(v).astype(DTYPES[k]) for k, v in self.history.items()})
+            self.stored_chunk_num += int(np.ceil(self.ep_step / self.chunk_len))
+            self.history_ep_datas.append(seg)
             self.history_ep_infos.append(Info(ep_return=self.ep_return))
             self.reset()
             if self.stored_chunk_num >= self.min_return_chunk_num:
@@ -77,46 +79,6 @@ class EnvWithMemory:
         for k in ROLLOUT_KEYS:
             self.history[k] = []
 
-    def collect(self):
-        v_target, adv = self.compute_gae()
-        data_batch = {}
-        for k in COLLECT_KEYS:
-            if k in ROLLOUT_KEYS:
-                data_batch[k] = np.stack(self.history[k], axis=0).astype(DTYPES[k])
-            elif k == 'value_target':
-                data_batch[k] = v_target.astype(DTYPES[k])
-            elif k == 'adv':
-                data_batch[k] = adv.astype(DTYPES[k])
-        return self.to_chunk(data_batch)
-
-    def to_chunk(self, data_batch):
-        chunk_num = int(np.ceil(self.ep_step / self.chunk_len))
-        target_len = chunk_num * self.chunk_len
-        chunks = {}
-        for k, v in data_batch.items():
-            if 'rnn_hidden' in k:
-                indices = np.arange(chunk_num) * self.chunk_len
-                chunks[k] = np.transpose(v[indices], (1, 0, 2))
-            else:
-                if len(v) < target_len:
-                    pad = tuple([(0, target_len - len(v))] + [(0, 0)] * (v.ndim - 1))
-                    pad_v = np.pad(v, pad, 'constant', constant_values=0)
-                else:
-                    pad_v = v
-                chunks[k] = pad_v.reshape(self.chunk_len, chunk_num, *v.shape[1:])
-        self.stored_chunk_num += chunk_num
-        return Seg(**chunks)
-
-    def compute_gae(self):
-        reward = np.array(self.history['reward'], dtype=np.float32)
-        value = np.array(self.history['value'], dtype=np.float32)
-        bootstrap_v = np.array(self.history['value'][1:] + [0], dtype=np.float32)
-        one_step_td = reward + self.gamma * bootstrap_v - value
-        adv = lfilter([1], [1, -self.lmbda * self.gamma], one_step_td[::-1])[::-1]
-
-        v_target = lfilter([1], [1, -self.gamma], self.history['reward'][::-1])[::-1]
-        return v_target, adv
-
 
 class VecEnvWithMemory:
     def __init__(self, env_fns):
@@ -132,11 +94,7 @@ class VecEnvWithMemory:
         stacked_model_inputs = []
         for inp in zip(*model_inputs):
             stacked_model_inputs.append(np.stack(inp))
-        if len(datas) > 0:
-            seg = Seg(*[np.concatenate([getattr(x, k) for x in datas], axis=1) for k in Seg._fields])
-        else:
-            seg = ()
-        return seg, infos, stacked_model_inputs
+        return datas, infos, stacked_model_inputs
 
     def get_model_inputs(self):
         model_inputs = [env._get_model_input() for env in self.envs]

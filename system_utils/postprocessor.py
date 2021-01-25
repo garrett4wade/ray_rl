@@ -1,121 +1,150 @@
-import threading
+import time
 import numpy as np
 import ray
+from collections import namedtuple
 from scipy.signal import lfilter
-from queue import Queue as ThreadSafeQueue
-from system_utils.worker import RolloutWorker
+from system_utils.worker import RawdataCollector
 
 
+@ray.remote(num_cpus=1, resources={'head': 1})
 class PostProcessor:
-    def __init__(self, processor_id, rollout_keys, collect_keys, model_fn, worker_env_fn, ps, kwargs):
+    def __init__(self, processor_id, num_workers, rollout_keys, collect_keys, model_fn, worker_env_fn, ps, config):
         """(remote) postprocessor of rollouts (e.g. compute GAE), however slow down performance, tentatively archived
         """
-        assert kwargs['num_workers'] % kwargs['num_postprocessors'] == 0
-        self.num_workers = kwargs['num_workers'] // kwargs['num_postprocessors']
-        self.workers = [
-            ray.remote(num_cpus=kwargs['cpu_per_worker'])(RolloutWorker).remote(
-                worker_id=i + kwargs['num_postprocessors'] * processor_id,
-                model_fn=model_fn,
-                worker_env_fn=worker_env_fn,
-                ps=ps,
-                kwargs=kwargs) for i in range(self.num_workers)
+        self.rawdata_collector = RawdataCollector.remote(num_workers, model_fn, worker_env_fn, ps, config)
+
+        self.rollout_keys = rollout_keys
+        self.collect_keys = collect_keys
+        self.gamma = config.gamma
+        self.lmbda = config.lmbda
+        self.chunk_len = config.chunk_len
+        self.CollectSegCls = namedtuple('CollectSeg', self.collect_keys)
+
+        self._generator = self._data_generator()
+
+    def _data_generator(self):
+        job = self.rawdata_collector.get_sample_ids.remote()
+        while True:
+            segs, infos, wait_time = ray.get(job)
+            job = self.rawdata_collector.get_sample_ids.remote()
+            collect_segs = [self.postprocess(seg) for seg in segs]
+            merged_seg = self.CollectSegCls(*[
+                np.concatenate([getattr(collect_seg, k) for collect_seg in collect_segs], axis=1)
+                for k in self.CollectSegCls._fields
+            ])
+            yield merged_seg, infos, wait_time
+
+    def postprocess(self, seg):
+        adv = self.compute_gae(seg.reward, seg.value)
+        value_target = self.n_step_return(seg.reward, seg.value)
+        data_batch = {}
+        for k in self.collect_keys:
+            if k in self.rollout_keys:
+                data_batch[k] = getattr(seg, k)
+            elif k == 'adv':
+                data_batch[k] = adv
+            elif k == 'value_target':
+                data_batch[k] = value_target
+            elif k == 'pad_mask':
+                data_batch[k] = np.ones(len(adv), dtype=np.uint8)
+        return self.to_chunk(data_batch)
+
+    def to_chunk(self, data_batch):
+        chunk_num = int(np.ceil(len(data_batch['adv']) / self.chunk_len))
+        target_len = chunk_num * self.chunk_len
+        chunks = {}
+        for k, v in data_batch.items():
+            if 'rnn_hidden' in k:
+                indices = np.arange(chunk_num) * self.chunk_len
+                chunks[k] = np.swapaxes(v[indices], 1, 0)
+            else:
+                if len(v) < target_len:
+                    pad = tuple([(0, target_len - len(v))] + [(0, 0)] * (v.ndim - 1))
+                    pad_v = np.pad(v, pad, 'constant', constant_values=0)
+                else:
+                    pad_v = v
+                chunks[k] = np.swapaxes(pad_v.reshape(chunk_num, self.chunk_len, *v.shape[1:]), 1, 0)
+        return self.CollectSegCls(**chunks)
+
+    def compute_gae(self, reward, value):
+        assert reward.ndim == 1 and value.ndim == 1
+        bootstrapped_v = np.concatenate([value[1:], np.zeros(1, dtype=np.float32)])
+        one_step_td = reward + self.gamma * bootstrapped_v - value
+        adv = lfilter([1], [1, -self.lmbda * self.gamma], one_step_td[::-1])[::-1]
+        return adv
+
+    def n_step_return(self, reward, value, bootstrap_step=None):
+        # compute n-step return given full episode data
+        assert reward.ndim == 1 and value.ndim == 1
+        bootstrap_step = min(self.chunk_len, len(reward)) if bootstrap_step is None else bootstrap_step
+        if bootstrap_step == np.inf:
+            # monte carlo return
+            return lfilter([1], [1, -self.gamma], reward[::-1])[::-1]
+        else:
+            # n-step TD return
+            bootstrap_step = min(self.chunk_len, len(reward)) if bootstrap_step is None else min(
+                bootstrap_step, len(reward))
+            discounted_r = lfilter(self.gamma**np.arange(self.chunk_len), [1], reward[::-1])[::-1]
+            bootstrapped_v = np.concatenate([value[bootstrap_step:], np.zeros(bootstrap_step, dtype=np.float32)])
+            return discounted_r + self.gamma**bootstrap_step * bootstrapped_v
+
+    @ray.method(num_returns=3)
+    def get(self):
+        return next(self._generator)
+
+
+class RolloutCollector:
+    def __init__(self, rollout_keys, collect_keys, model_fn, worker_env_fn, ps, config):
+        self.total_workers = config.num_workers
+        self.total_postprocessors = config.num_postprocessors
+        self.worker_num_allocation = self.allocate_worker()
+        self.postprocessors = [
+            PostProcessor.remote(processor_id=i,
+                                 num_workers=self.worker_num_allocation[i],
+                                 rollout_keys=rollout_keys,
+                                 collect_keys=collect_keys,
+                                 model_fn=model_fn,
+                                 worker_env_fn=worker_env_fn,
+                                 ps=ps,
+                                 config=config) for i in range(self.total_postprocessors)
         ]
         self.working_jobs = []
         # job_hashing maps job id to worker index
         self.job_hashing = {}
-        self.ready_queue = ThreadSafeQueue(maxsize=self.num_workers)
 
-        self.gamma = kwargs['gamma']
-        self.lmbda = kwargs['lmbda']
-        self.chunk_len = kwargs['chunk_len']
+        self._data_id_g = self._data_id_generator()
+        print("---------------------------------------------------")
+        print("              Workers starting ......              ")
+        print("---------------------------------------------------")
 
-        self.stored_chunk_num = 0
-        self.stored_infos = []
-        self.stored_concat_datas = []
+    def _start(self):
+        for i in range(self.total_postprocessors):
+            sample_job, info_job, worker_wait_time_job = self.postprocessors[i].get.remote()
+            self.working_jobs.append(sample_job)
+            self.job_hashing[sample_job] = (i, info_job, worker_wait_time_job)
 
-        self.min_return_chunk_num = kwargs['min_return_chunk_num'] * self.num_workers
-        self._generator = self._data_generator()
-
-        self.rollout_keys = rollout_keys
-        self.collect_keys = collect_keys
-
-    def collect_traj(self):
+    def _data_id_generator(self):
         # iteratively make worker active
-        for i in range(self.num_workers):
-            job = self.workers[i].get.remote()
-            self.working_jobs.append(job)
-            self.job_hashing[job] = i
+        self._start()
         while True:
-            [ready_job], self.working_jobs = ray.wait(self.working_jobs, num_returns=1)
+            start = time.time()
+            [ready_sample_job], self.working_jobs = ray.wait(self.working_jobs, num_returns=1)
+            wait_time = time.time() - start
 
-            worker_id = self.job_hashing[ready_job]
-            self.job_hashing.pop(ready_job)
+            worker_id, ready_info_job, worker_wait_time_job = self.job_hashing[ready_sample_job]
+            self.job_hashing.pop(ready_sample_job)
 
-            new_job = self.workers[worker_id].get.remote()
-            self.working_jobs.append(new_job)
-            self.job_hashing[new_job] = worker_id
+            new_sample_job, new_info_job, new_worker_wait_time_job = self.postprocessors[worker_id].get.remote()
+            self.working_jobs.append(new_sample_job)
+            self.job_hashing[new_sample_job] = (worker_id, new_info_job, new_worker_wait_time_job)
+            yield ready_sample_job, ready_info_job, worker_wait_time_job, wait_time
 
-            self.ready_queue.put(ready_job)
+    def get_sample_ids(self):
+        return next(self._data_id_g)
 
-    def _data_generator(self):
-        collect_job = threading.Thread(target=self.collect_traj, daemon=True)
-        collect_job.start()
-        while True:
-            ready_job = self.ready_queue.get()
-            datas, infos = ray.get(ready_job)
-            self.stored_infos += infos
-            for seg, bootstrap_value in datas:
-                eplen = len(seg[0])
-                value_target, adv = self.compute_gae(getattr(seg, 'reward'), getattr(seg, 'value'), bootstrap_value)
-                blks = []
-                for k in self.collect_keys[:-1]:
-                    if k in self.rollout_keys:
-                        blks.append(getattr(seg, k).reshape(eplen, -1))
-                    elif k == 'value_target':
-                        blks.append(value_target)
-                    elif k == 'adv':
-                        blks.append(adv)
-                    else:
-                        raise NotImplementedError
-                storage_block = np.concatenate(blks, axis=-1)
-                self.stored_concat_datas.append(self.to_chunk(storage_block, getattr(seg, 'rnn_hidden', None)))
-
-            if self.stored_chunk_num >= self.min_return_chunk_num:
-                storage_blocks, rnn_hiddens = zip(*self.stored_concat_datas)
-                storage_blocks = np.concatenate(storage_blocks, axis=1)
-                if rnn_hiddens[0] is not None:
-                    rnn_hiddens = np.concatenate(rnn_hiddens, axis=1)
-                else:
-                    rnn_hiddens = None
-                yield (storage_blocks, rnn_hiddens), self.stored_infos
-
-                self.stored_concat_datas = []
-                self.stored_infos = []
-                self.stored_chunk_num = 0
-
-    def to_chunk(self, storage_block, redundant_rnn_hidden=None):
-        chunk_num = int(np.ceil(len(storage_block) / self.chunk_len))
-        target_len = chunk_num * self.chunk_len
-        if len(storage_block) < target_len:
-            pad = tuple([(0, target_len - len(storage_block))] + [(0, 0)] * (storage_block.ndim - 1))
-            storage_block = np.pad(storage_block, pad, 'constant', constant_values=0)
-        storage_block = storage_block.reshape(self.chunk_len, chunk_num, *storage_block.shape[1:])
-        self.stored_chunk_num += chunk_num
-        if redundant_rnn_hidden is not None:
-            indices = np.arange(chunk_num) * self.chunk_len
-            rnn_hidden = np.transpose(redundant_rnn_hidden[indices], (1, 0, 2))
-        else:
-            rnn_hidden = None
-        return storage_block, rnn_hidden
-
-    def compute_gae(self, reward, value, bootstrap_value):
-        eplen = len(reward)
-        discounted_r = lfilter([1], [1, -self.gamma], reward.squeeze(-1)[::-1])[::-1]
-        discount_factor = self.gamma**np.arange(eplen, 0, -1)
-        n_step_v = discounted_r + bootstrap_value * discount_factor
-        td_err = n_step_v - value.squeeze(-1)
-        adv = lfilter([1], [1, -self.lmbda], td_err[::-1])[::-1]
-        return np.expand_dims(n_step_v, 1), np.expand_dims(adv, 1)
-
-    def get(self):
-        return next(self._generator)
+    def allocate_worker(self):
+        allocation = [self.total_workers // self.total_postprocessors] * self.total_postprocessors
+        for i in range(self.total_workers % self.total_postprocessors):
+            allocation[i] += 1
+        assert sum(allocation) == self.total_workers
+        return allocation

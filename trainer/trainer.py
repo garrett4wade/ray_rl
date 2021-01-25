@@ -18,7 +18,8 @@ class Trainer:
                  weights_available,
                  ep_info_dict,
                  queue_util,
-                 wait_time,
+                 worker_wait_time,
+                 postprocessor_wait_time,
                  config,
                  optimizer='adam'):
         self.rank = rank
@@ -36,7 +37,8 @@ class Trainer:
         # for summary information
         self.ep_info_dict = ep_info_dict
         self.queue_util = queue_util
-        self.wait_time = wait_time
+        self.worker_wait_time = worker_wait_time
+        self.postprocessor_wait_time = postprocessor_wait_time
 
     def setup(self):
         """
@@ -165,7 +167,8 @@ class Trainer:
             'buffer/received_sample': self.buffer.get_received_sample(),
             'buffer/consumed_sample': self.num_frames / self.config.chunk_len,
             'buffer/ready_id_queue_util': self.queue_util.item(),
-            'buffer/ray_wait_time': self.wait_time.item(),
+            'buffer/worker_wait_time': self.worker_wait_time.item(),
+            'buffer/postprocessor_wait_time': self.postprocessor_wait_time.item(),
         }
 
         # write summary into weights&biases
