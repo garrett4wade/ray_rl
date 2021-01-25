@@ -10,7 +10,7 @@ from env.atari.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, I
 from env.atari.model.rec_model import ActorCritic, compute_loss
 from env.atari.wrappers import WarpFrame, FrameStack
 from system_utils.rollout_runner import RolloutRunner
-from trainer import Trainer
+from trainer.trainer import Trainer
 from utils.find_free_gpu import find_free_gpu
 
 # global configuration
@@ -53,6 +53,7 @@ parser.add_argument('--ray_dashboard', action='store_true', help='use ray dashbo
 parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
+parser.add_argument('--num_postprocessors', type=int, default=2, help='remote worker numbers')
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
 parser.add_argument('--q_size', type=int, default=8, help='number of batches in replay buffer')
 
@@ -140,7 +141,8 @@ if __name__ == "__main__":
                 weights_available=rollout_runner.weights_available,
                 ep_info_dict=rollout_runner.ep_info_dict,
                 queue_util=rollout_runner.queue_util,
-                wait_time=rollout_runner.wait_time,
+                worker_wait_time=rollout_runner.worker_wait_time,
+                postprocessor_wait_time=rollout_runner.postprocessor_wait_time,
                 config=config) for rank in ranks
     ]
     jobs = [mp.Process(target=trainer.run) for trainer in trainers]
