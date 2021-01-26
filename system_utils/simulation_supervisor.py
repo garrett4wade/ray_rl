@@ -4,6 +4,7 @@ import threading
 from ray.util.queue import Queue as RayQueue
 import zmq
 import os
+import time
 import numpy as np
 from copy import deepcopy
 from collections import OrderedDict, namedtuple
@@ -120,6 +121,11 @@ class SimulationSupervisor(mp.Process):
 
         upload_job = []
         while True:
+            time.sleep(1)
+            self.queue_util.copy_(torch.tensor(self.ready_id_queue.qsize() / (4 * self.config.num_workers)))
+            if len(self.wait_times) > 0:
+                self.wait_time.copy_(torch.tensor(np.mean(self.wait_times)))
+                self.wait_times = []
             if self.weights_available:
                 ray.get(upload_job)
                 upload_job = self.ps.set_weights.remote(deepcopy(self.weights))

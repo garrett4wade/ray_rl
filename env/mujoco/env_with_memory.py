@@ -41,22 +41,6 @@ class EnvWithMemory:
         self.reset_history()
 
     def step(self, action, action_logits, value):
-        if self.done:
-            # if env is done in the previous step, use bootstrap value
-            # to compute gae and collect history data
-            self.history_ep_datas.append(self.collect(value))
-            self.history_ep_infos.append(Info(ep_return=self.ep_return))
-            self.reset()
-            if self.stored_chunk_num >= self.min_return_chunk_num:
-                datas = self.history_ep_datas.copy()
-                infos = self.history_ep_infos.copy()
-                self.history_ep_datas = []
-                self.history_ep_infos = []
-                self.stored_chunk_num = 0
-                return datas, infos, self._get_model_input()
-            else:
-                return [], [], self._get_model_input()
-
         n_obs, r, d, _ = self.env.step(action)
         n_obs = self._preprocess(n_obs)
 
@@ -72,6 +56,19 @@ class EnvWithMemory:
 
         self.obs = n_obs
         self.done = d or self.ep_step >= self.max_timesteps
+        if self.done:
+            self.history_ep_datas.append(self.collect())
+            self.history_ep_infos.append(Info(ep_return=self.ep_return))
+            self.reset()
+            if self.stored_chunk_num >= self.min_return_chunk_num:
+                datas = self.history_ep_datas.copy()
+                infos = self.history_ep_infos.copy()
+                self.history_ep_datas = []
+                self.history_ep_infos = []
+                self.stored_chunk_num = 0
+                return datas, infos, self._get_model_input()
+            else:
+                return [], [], self._get_model_input()
         return [], [], self._get_model_input()
 
     def reset_history(self):
@@ -79,8 +76,8 @@ class EnvWithMemory:
         for k in ROLLOUT_KEYS:
             self.history[k] = []
 
-    def collect(self, bootstrap_value):
-        v_target, adv = self.compute_gae(bootstrap_value)
+    def collect(self):
+        v_target, adv = self.gae_and_vtarget()
         data_batch = {}
         for k in COLLECT_KEYS:
             if k in ROLLOUT_KEYS:
@@ -109,13 +106,16 @@ class EnvWithMemory:
         self.stored_chunk_num += chunk_num
         return Seg(**chunks)
 
-    def compute_gae(self, bootstrap_value):
-        discounted_r = lfilter([1], [1, -self.gamma], self.history['reward'][::-1])[::-1]
-        discount_factor = self.gamma**np.arange(self.ep_step, 0, -1)
-        n_step_v = discounted_r + bootstrap_value * discount_factor
-        td_err = n_step_v - np.array(self.history['value'], dtype=np.float32)
-        adv = lfilter([1], [1, -self.lmbda], td_err[::-1])[::-1]
-        return n_step_v, adv
+    def gae_and_vtarget(self):
+        reward = np.array(self.history['reward'], dtype=np.float32)
+        value = np.array(self.history['value'], dtype=np.float32)
+        bootstrapped_v = np.concatenate([value[1:], np.zeros(1, dtype=np.float32)])
+
+        one_step_td = reward + self.gamma * bootstrapped_v - value
+        adv = lfilter([1], [1, -self.lmbda * self.gamma], one_step_td[::-1])[::-1]
+
+        value_target = lfilter([1], [1, -self.gamma], reward[::-1])[::-1]
+        return value_target, adv
 
 
 class VecEnvWithMemory:

@@ -1,15 +1,15 @@
 pkill -9 ray
 pkill -9 python3.8
-rm -rf /dev/shm/*
+# rm -rf /dev/shm/*
 num_workers=(48)
 num_env=16
-group_name="shm_buf"
-job_name="shm_buf"
+group_name="postprocessor"
+job_name="postprocessor"
 num_frames=10000000
-seed=986258
+seed=689257
 for num_worker in ${num_workers[@]}
 do
-    exp_name="humanoid_"${num_env}"*"${num_worker}
+    exp_name="benchmark_sample_gae_"${num_env}"*"${num_worker}
     echo "current experiment ${exp_name}"
     python3.8 main_mujoco.py --exp_name ${exp_name} \
                             --wandb_group ${group_name} \
@@ -21,9 +21,8 @@ do
                             --min_return_chunk_num 64 \
                             --batch_size 2560 \
                             --num_writers 1 \
-                            --num_gpus 1 \
-                            --no_summary
+                            --num_gpus 1
     pkill -9 ray
     pkill -9 python3.8
-    rm -rf /dev/shm/*
+    # rm -rf /dev/shm/*
 done

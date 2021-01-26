@@ -4,15 +4,14 @@ import time
 import argparse
 import numpy as np
 
+import wandb
 import torch
-import torch.multiprocessing as mp
 from env.atari.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from env.atari.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Info
-from env.atari.model.rec_model import ActorCritic, compute_loss
+from env.atari.model.rec_model import ActorCritic
 from env.atari.wrappers import WarpFrame, FrameStack
 from rollout_runner import RolloutRunner
-from trainer import Trainer
-from utils.find_free_gpu import find_free_gpu
+
 
 # global configuration
 parser = argparse.ArgumentParser(description='run asynchronous PPO')
@@ -127,29 +126,26 @@ if __name__ == "__main__":
                                    config=config)
     rollout_runner.run()
 
-    # initialize trainer for each GPU and start DDP training
-    if not config.cluster:
-        ranks = find_free_gpu(config.num_gpus)
-    else:
-        ranks = list(range(config.num_gpus))
-    trainers = [
-        Trainer(rank=rank,
-                world_size=config.num_gpus,
-                model=learner_prototype,
-                loss_fn=compute_loss,
-                buffer=rollout_runner.buffer,
-                global_weights=rollout_runner.global_weights,
-                weights_available=rollout_runner.weights_available,
-                ep_info_dict=rollout_runner.ep_info_dict,
-                queue_util=rollout_runner.queue_util,
-                wait_time=rollout_runner.wait_time,
-                config=config) for rank in ranks
-    ]
-    jobs = [mp.Process(target=trainer.run) for trainer in trainers]
-    for job in jobs:
-        job.start()
-    for job in jobs:
-        job.join()
+    if not config.no_summary:
+        wandb_exp = wandb.init(project='distributed rl',
+                               group=config.wandb_group,
+                               job_type=config.wandb_job,
+                               name=config.exp_name,
+                               entity='garrett4wade',
+                               config=vars(config))
+
+    # record data for 500s
+    for log_cnt in range(1, 501):
+        if not config.no_summary:
+            wandb.log(
+                {
+                    'buffer/utilization': rollout_runner.buffer.get_util(),
+                    'buffer/received_sample': rollout_runner.buffer.get_received_sample(),
+                    'buffer/ready_id_queue_util': rollout_runner.queue_util.item(),
+                    'buffer/ray_wait_time': rollout_runner.wait_time.item(),
+                },
+                step=log_cnt)
+        time.sleep(1)
 
     # terminate rollout workers
     rollout_runner.shutdown()

@@ -18,6 +18,7 @@ DTYPES = OrderedDict({
     'adv': float32,
     'value_target': float32,
     'pad_mask': uint8,
+    'reward': float32,
 })
 
 
