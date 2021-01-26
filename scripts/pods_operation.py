@@ -15,7 +15,7 @@ if __name__ == "__main__":
         os.system('kubectl delete -f ~/workspace/gpupool/distributed/ray.yaml')
         os.system('kubectl apply -f ~/workspace/gpupool/distributed/ray.yaml')
         print("restart finished, waiting for pods ready ...")
-        time.sleep(10)
+        time.sleep(30)
 
     Pod = namedtuple('Pod', ['name', 'ready', 'status', 'restarts', 'age'])
     child1 = subprocess.Popen(["kubectl", 'get', 'pods'], stdout=subprocess.PIPE)
@@ -28,10 +28,12 @@ if __name__ == "__main__":
 
     if args.copy:
         # copy codes to pods
+        code_folder = '~/workspace/ray_rl'
+        destination = '/ray_rl'
         for pod in pods:
             if pod.status == 'Running':
-                os.system('kubectl exec -it {} -- rm -rf /ray_rl'.format(pod.name))
-                os.system('kubectl cp ~/workspace/ray_rl {}:/ray_rl'.format(pod.name))
+                os.system('kubectl exec -it {} -- rm -rf '.format(pod.name) + destination)
+                os.system('kubectl cp ' + code_folder + ' {}:'.format(pod.name) + destination)
                 print('finished copy onto {}.'.format(pod.name))
             else:
                 print("pod {} is not running yet, ignore copy onto this pod.".format(pod.name))
