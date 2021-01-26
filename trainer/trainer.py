@@ -73,15 +73,6 @@ class Trainer:
         else:
             raise NotImplementedError
 
-        # pre-allocate cuda tensor to copy data from buffer
-        self.tensor_dict = {}
-        for k, shp in self.buffer.shapes.items():
-            if 'rnn_hidden' in k:
-                self.tensor_dict[k] = torch.zeros((shp[0], self.config.batch_size, *shp[1:]),
-                                                  dtype=getattr(torch, self.buffer.dtypes[k].__name__)).cuda()
-            else:
-                self.tensor_dict[k] = torch.zeros((self.config.chunk_len, self.config.batch_size, *shp),
-                                                  dtype=getattr(torch, self.buffer.dtypes[k].__name__)).cuda()
         self.num_frames = 0
         self.global_step = 0
 
@@ -89,12 +80,12 @@ class Trainer:
         if self.world_size > 1:
             dist.destroy_process_group()
 
-    def train_learner_on_batch(self):
+    def train_learner_on_batch(self, data_batch):
         self.optimizer.zero_grad()
         v_loss, p_loss, entropy_loss = self.loss_fn(self.learner,
                                                     clip_ratio=self.config.clip_ratio,
                                                     world_size=self.world_size,
-                                                    **self.tensor_dict)
+                                                    **data_batch)
         loss = p_loss + self.config.value_coef * v_loss + self.config.entropy_coef * entropy_loss
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.learner.parameters(), self.config.max_grad_norm)
@@ -106,7 +97,7 @@ class Trainer:
         while self.num_frames < self.config.total_frames:
             # sample and load into gpu
             iter_start = time.time()
-            self.buffer.get(self.tensor_dict)
+            data_batch = self.buffer.get()
             sample_time = time.time() - iter_start
 
             self.num_frames += int(self.config.chunk_len * self.config.batch_size * self.config.num_gpus)
@@ -115,7 +106,7 @@ class Trainer:
                 update !
             '''
             start = time.time()
-            v_loss, p_loss, entropy_loss, grad_norm = self.train_learner_on_batch()
+            v_loss, p_loss, entropy_loss, grad_norm = self.train_learner_on_batch(data_batch)
             optimize_time = time.time() - start
 
             # broadcast updated learner parameters to each subprocess

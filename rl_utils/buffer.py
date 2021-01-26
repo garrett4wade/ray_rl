@@ -168,7 +168,7 @@ class SharedCircularBuffer:
                    "postprocess time: {:.2f}ms").format(1e3 * (tw - t1), 1e3 * (t2 - tw), 1e3 * (t3 - t2),
                                                         1e3 * (t4 - t3)))
 
-    def get(self, target_shm_tensor_dict):
+    def get(self):
         import time
         t1 = time.time()
         try:
@@ -182,8 +182,9 @@ class SharedCircularBuffer:
             self._read_ready.release()
         t2 = time.time()
 
+        data_batch = {}
         for k in self.storage._fields:
-            target_shm_tensor_dict[k].copy_(from_numpy(getattr(self.storage, k)[:, indices]))
+            data_batch[k] = from_numpy(getattr(self.storage, k)[:, indices]).cuda()
 
         t3 = time.time()
         try:
@@ -206,6 +207,7 @@ class SharedCircularBuffer:
             print(("GET wait time: {:.2f}ms | " + "preprocess time: {:.2f}ms | " + "copy time: {:.2f}ms | " +
                    "postprocess time: {:.2f}ms").format(1e3 * (tw - t1), 1e3 * (t2 - tw), 1e3 * (t3 - t2),
                                                         1e3 * (t4 - t3)))
+        return data_batch
 
     def get_util(self):
         return self.size() / self.maxsize
