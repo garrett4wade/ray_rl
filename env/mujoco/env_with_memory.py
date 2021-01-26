@@ -114,7 +114,7 @@ class EnvWithMemory:
         one_step_td = reward + self.gamma * bootstrap_v - value
         adv = lfilter([1], [1, -self.lmbda * self.gamma], one_step_td[::-1])[::-1]
 
-        v_target = lfilter([1], [1, -self.gamma], self.history['reward'][::-1])[::-1]
+        v_target = lfilter([1], [1, -self.gamma], reward[::-1])[::-1]
         return v_target, adv
 
 

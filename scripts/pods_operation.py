@@ -1,13 +1,22 @@
 import os
+import time
 import subprocess
 import argparse
 from collections import namedtuple
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--copy', action='store_true', help='copy code to pods')
+parser.add_argument('--restart', action='store_true', help='restart pods')
 args = parser.parse_args()
 
 if __name__ == "__main__":
+    if args.restart:
+        print("restarting pods ...")
+        os.system('kubectl delete -f ~/workspace/gpupool/distributed/ray.yaml')
+        os.system('kubectl apply -f ~/workspace/gpupool/distributed/ray.yaml')
+        print("restart finished, waiting for pods ready ...")
+        time.sleep(10)
+
     Pod = namedtuple('Pod', ['name', 'ready', 'status', 'restarts', 'age'])
     child1 = subprocess.Popen(["kubectl", 'get', 'pods'], stdout=subprocess.PIPE)
     all_pods_str = [s.decode() for s in child1.stdout.read().split()[5:]]

@@ -9,7 +9,6 @@ if __name__ == "__main__":
     assert len(worker_processes) == num_workers
     while True:
         cpu_percents = [p.cpu_percent() for p in worker_processes]
-        cpu_info = "Ray worker process CPU average usage: {:.2f}%, maximum usage: {:.2f}%, minimum usage: {:.2f}%".format(
-            np.mean(cpu_percents), np.max(cpu_percents), np.min(cpu_percents))
-        print(cpu_info)
+        print("Ray worker process CPU average usage: {:.2f}%, maximum usage: {:.2f}%, minimum usage: {:.2f}%".format(
+            np.mean(cpu_percents), np.max(cpu_percents), np.min(cpu_percents)))
         time.sleep(1)
