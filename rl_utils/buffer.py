@@ -7,6 +7,25 @@ from multiprocessing.managers import SharedMemoryManager
 from multiprocessing import Lock, Condition
 
 
+def byte_of_dtype(dtype):
+    if '32' in str(dtype):
+        byte_per_digit = 4
+    elif '64' in str(dtype):
+        byte_per_digit = 8
+    elif 'bool' in str(dtype) or '8' in str(dtype):
+        byte_per_digit = 1
+    else:
+        raise NotImplementedError
+    return byte_per_digit
+
+
+def shm_array_from_smm(smm, shape, dtype):
+    byte_per_digit = byte_of_dtype(dtype)
+    shm = smm.SharedMemory(size=byte_per_digit * np.prod(shape))
+    shm_array = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
+    return shm, shm_array
+
+
 class CircularBuffer:
     def __init__(self, maxsize, reuse_times, keys):
         self._storage = []
@@ -72,94 +91,111 @@ class CircularBuffer:
 
 
 class SharedCircularBuffer:
-    def __init__(self, maxsize, chunk_len, reuse_times, shapes, dtypes, num_gpus, bs_per_gpu, verbose_time=False):
-        self.reuse_times = reuse_times
-        self.maxsize = maxsize
+    def __init__(self, q_size, chunk_len, bs_per, world_size, reuse_times, shapes, dtypes, verbose_time=False):
+        self.q_size = q_size
         self.chunk_len = chunk_len
-        self.bs_per_gpu = bs_per_gpu
-        self.num_read_proc = num_gpus
+        self.bs_per = bs_per
+        self.world_size = world_size
+        self.reuse_times = reuse_times
         self.shapes = shapes
         self.dtypes = dtypes
         self.verbose_time = verbose_time
 
-        self._read_ready = Condition(Lock())
+        self.num_batches = num_batches = q_size * world_size
 
+        self._read_ready = Condition(Lock())
         self._smm = SharedMemoryManager()
         self._smm.start()
+
         self._storage_shms = []
         storage = []
-
+        # initialize storage numpy arrays, which are orgnized as a namedtuple
         for k, shp in shapes.items():
-            if '32' in str(dtypes[k]):
-                byte_per_digit = 4
-            elif 'bool' in str(dtypes[k]) or '8' in str(dtypes[k]):
-                byte_per_digit = 1
+            if 'rnn_hidden' in k:
+                shm, array = shm_array_from_smm(self._smm, (num_batches, shp[0], bs_per, *shp[1:]), dtypes[k])
             else:
-                raise NotImplementedError
-            if 'rnn_hidden' not in k:
-                _storage_shm = self._smm.SharedMemory(size=byte_per_digit * maxsize * chunk_len * np.prod(shp))
-                storage.append(np.ndarray((chunk_len, maxsize, *shp), dtype=dtypes[k], buffer=_storage_shm.buf))
-            else:
-                _storage_shm = self._smm.SharedMemory(size=byte_per_digit * maxsize * np.prod(shp))
-                storage.append(np.ndarray((shp[0], maxsize, *shp[1:]), dtype=dtypes[k], buffer=_storage_shm.buf))
-            self._storage_shms.append(_storage_shm)
+                shm, array = shm_array_from_smm(self._smm, (num_batches, chunk_len, bs_per, *shp), dtypes[k])
+            self._storage_shms.append(shm)
+            storage.append(array)
         self.storage = namedtuple('Seg', list(self.shapes.keys()))(*storage)
 
-        self._used_times_shm = self._smm.SharedMemory(size=maxsize)
-        self.used_times = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._used_times_shm.buf)
+        # indicator of how many times each batch has been used
+        self._used_times_shm, self.used_times = shm_array_from_smm(self._smm, (num_batches, ), np.uint8)
+        # indicate of whether each batch is ready to be read
+        self._is_readable_shm, self.is_readable = shm_array_from_smm(self._smm, (num_batches, ), np.uint8)
+        # indicate of whether each batch is ready to be written
+        self._is_writable_shm, self.is_writable = shm_array_from_smm(self._smm, (num_batches, ), np.uint8)
+        self.is_writable[:] = np.ones((num_batches, ), dtype=np.uint8)[:]
 
-        # if is_free is 1, then the corresponding storage can be written but can't be read
-        self._is_free_shm = self._smm.SharedMemory(size=maxsize)
-        self.is_free = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._is_free_shm.buf)
-        self.is_free[:] = np.ones((maxsize, ), dtype=np.uint8)[:]
-        # if is_busy is 1, then the corresponding storage is being written
-        self._is_busy_shm = self._smm.SharedMemory(size=maxsize)
-        self.is_busy = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._is_busy_shm.buf)
-        # is is_ready is 1, then the corresponding storage can be written & read
-        self._is_ready_shm = self._smm.SharedMemory(size=maxsize)
-        self.is_ready = np.ndarray((maxsize, ), dtype=np.uint8, buffer=self._is_ready_shm.buf)
-
-        self._received_sample_shm = self._smm.SharedMemory(size=8)
-        self.received_sample = np.ndarray((), dtype=np.int64, buffer=self._received_sample_shm.buf)
+        self._received_sample_shm, self.received_sample = shm_array_from_smm(self._smm, (), np.int64)
+        self._glb_wrt_ptr_shm, self.glb_wrt_ptr = shm_array_from_smm(self._smm, (), np.int64)
 
     def size(self):
-        return sum(self.is_ready)
+        # TODO: it is just count of readable batches
+        return sum(self.is_readable)
 
     def __len__(self):
         return self.size()
 
-    def put(self, data_batch):
-        batch_size = data_batch[0].shape[1]
+    def put(self, seg):
+        seg_size = seg[0].shape[1]
 
+        # find available slots to write data, and move global pointer to next position
         t1 = time.time()
         try:
             self._read_ready.acquire()
             tw = time.time()
-            indices = np.nonzero(self.is_free)[0][:batch_size]
-            self.is_free[indices] = 0
-            if len(indices) < batch_size:
-                extend_indices = np.nonzero(self.is_ready)[0][:batch_size - len(indices)]
-                self.is_ready[extend_indices] = 0
-                indices = np.concatenate([indices, extend_indices])
-            assert len(indices) == batch_size, ('No enough free & ready indices, try to increase buffer size!')
-            self.is_busy[indices] = 1
-            # assert np.all(self.is_ready + self.is_busy + self.is_free)
+            # get current batch and slot index
+            b_idx, s_idx = (self.glb_wrt_ptr // self.bs_per) % self.num_batches, self.glb_wrt_ptr % self.bs_per
+            assert self.is_writable[b_idx] and not self.is_readable[b_idx], (self.is_readable, self.is_writable)
+            overflow = s_idx + seg_size >= self.bs_per
+            if overflow:
+                self.is_writable[b_idx] = 0
+                remaining = seg_size + s_idx - self.bs_per
+                assert remaining < self.bs_per, 'try to increase batch size'
+                all_writable_indices = np.nonzero(self.is_writable)[0]
+                nex_b_idx = (b_idx + 1) % self.num_batches
+                if len(all_writable_indices) > 0:
+                    # first, try to find the next writable batch
+                    b_idx2 = nex_b_idx
+                    while not self.is_writable[b_idx2]:
+                        b_idx2 = (b_idx2 + 1) % self.num_batches
+                else:
+                    # if there's no writable batch, find the next readable batch and overwrite it
+                    all_readable_indices = np.nonzero(self.is_readable)[0]
+                    assert len(all_readable_indices) > 0, 'try to increase buffer q_size'
+                    b_idx2 = nex_b_idx
+                    while not self.is_readable[b_idx2]:
+                        b_idx2 = (b_idx2 + 1) % self.num_batches
+                    self.is_writable[b_idx2] = 1
+                    self.is_readable[b_idx2] = 0
+                self.glb_wrt_ptr[()] = b_idx2 * self.bs_per + remaining
+            else:
+                self.glb_wrt_ptr += seg_size
         finally:
+            # for debug
+            # assert not np.any(np.logical_and(self.is_readable, self.is_writable))
             self._read_ready.release()
         t2 = time.time()
 
-        for k in data_batch._fields:
-            getattr(self.storage, k)[:, indices] = getattr(data_batch, k).astype(self.dtypes[k])
+        if not overflow:
+            s = slice(s_idx, s_idx + seg_size)
+            for k in seg._fields:
+                getattr(self.storage, k)[b_idx, :, s] = getattr(seg, k).astype(self.dtypes[k])
+        else:
+            cut = self.bs_per - s_idx
+            for k in seg._fields:
+                getattr(self.storage, k)[b_idx, :, s_idx:] = getattr(seg, k)[:, :cut].astype(self.dtypes[k])
+                getattr(self.storage, k)[b_idx2, :, :remaining] = getattr(seg, k)[:, cut:].astype(self.dtypes[k])
 
         t3 = time.time()
         self._read_ready.acquire()
         try:
-            self.is_busy[indices] = 0
-            self.is_ready[indices] = 1
-            self.received_sample += batch_size
-            # assert np.all(self.is_ready + self.is_busy + self.is_free)
-            if np.sum(self.is_ready) >= self.bs_per_gpu * self.num_read_proc:
-                self._read_ready.notify(self.num_read_proc)
+            self.received_sample += seg_size
+            if overflow:
+                self.is_readable[b_idx] = 1
+                if np.sum(self.is_readable) >= self.world_size:
+                    self._read_ready.notify(self.world_size)
         finally:
             self._read_ready.release()
         t4 = time.time()
@@ -168,39 +204,39 @@ class SharedCircularBuffer:
                    "postprocess time: {:.2f}ms").format(1e3 * (tw - t1), 1e3 * (t2 - tw), 1e3 * (t3 - t2),
                                                         1e3 * (t4 - t3)))
 
-    def get(self):
+    def get(self, barrier=None):
         import time
         t1 = time.time()
         try:
             self._read_ready.acquire()
-            self._read_ready.wait_for(lambda: np.sum(self.is_ready) >= self.bs_per_gpu * self.num_read_proc)
+            self._read_ready.wait_for(lambda: np.sum(self.is_readable) >= self.world_size)
             tw = time.time()
-            indices = np.random.choice(np.nonzero(self.is_ready)[0], self.bs_per_gpu, replace=False)
-            self.is_busy[indices] = 1
-            self.is_ready[indices] = 0
+            b_idx = np.nonzero(self.is_readable)[0][0]
+            assert self.is_readable[b_idx] and not self.is_writable[b_idx]
+            self.is_readable[b_idx] = 0
         finally:
             self._read_ready.release()
         t2 = time.time()
 
+        if barrier is not None:
+            barrier.wait()
         data_batch = {}
         for k in self.storage._fields:
-            data_batch[k] = from_numpy(getattr(self.storage, k)[:, indices]).cuda()
+            data_batch[k] = from_numpy(getattr(self.storage, k)[b_idx]).cuda()
 
         t3 = time.time()
         try:
             self._read_ready.acquire()
-            self.is_busy[indices] = 0
-            self.is_ready[indices] = 1
-            # for used-up samples, is_ready -> is_busy (in case of being overwritten) -> is_free
-            # for non-used-up samples, is_ready -> is_ready (unchanged)
-            self.used_times[indices] += 1
-            used_up_indices = indices[self.used_times[indices] >= self.reuse_times]
-            self.used_times[used_up_indices] = 0
-
-            self.is_ready[used_up_indices] = 0
-            self.is_free[used_up_indices] = 1
+            self.used_times[b_idx] += 1
+            if self.used_times[b_idx] >= self.reuse_times:
+                self.used_times[b_idx] = 0
+                self.is_readable[b_idx] = 0
+                self.is_writable[b_idx] = 1
+            else:
+                self.is_readable[b_idx] = 1
         finally:
-            # assert np.all(self.is_ready + self.is_busy + self.is_free)
+            # for debug
+            # assert not np.any(np.logical_and(self.is_readable, self.is_writable))
             self._read_ready.release()
         t4 = time.time()
         if self.verbose_time:
@@ -210,7 +246,7 @@ class SharedCircularBuffer:
         return data_batch
 
     def get_util(self):
-        return self.size() / self.maxsize
+        return self.size() / self.num_batches
 
     def get_received_sample(self):
         return self.received_sample.item()

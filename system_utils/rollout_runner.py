@@ -17,9 +17,8 @@ class RolloutRunner:
         config,
     ):
         # initialize buffer
-        buffer_maxsize = config.batch_size * config.q_size * config.num_gpus
-        self.buffer = SharedCircularBuffer(buffer_maxsize, config.chunk_len, config.reuse_times, shapes, dtypes,
-                                           config.num_gpus, config.batch_size)
+        self.buffer = SharedCircularBuffer(config.q_size, config.chunk_len, config.batch_size, config.num_gpus,
+                                           config.reuse_times, shapes, dtypes)
         self.shapes = shapes
         self.dtypes = dtypes
         self.rollout_keys = rollout_keys

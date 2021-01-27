@@ -14,6 +14,7 @@ class Trainer:
                  model,
                  loss_fn,
                  buffer,
+                 ctrl,
                  global_weights,
                  weights_available,
                  ep_info_dict,
@@ -27,6 +28,7 @@ class Trainer:
         self.learner_prototype = model
         self.loss_fn = loss_fn
         self.buffer = buffer
+        self.ctrl = ctrl
         self.optimizer_nickname = optimizer
 
         # for parameters broadcasting to workers
@@ -97,7 +99,7 @@ class Trainer:
         while self.num_frames < self.config.total_frames:
             # sample and load into gpu
             iter_start = time.time()
-            data_batch = self.buffer.get()
+            data_batch = self.buffer.get(self.ctrl.barrier)
             sample_time = time.time() - iter_start
 
             self.num_frames += int(self.config.chunk_len * self.config.batch_size * self.config.num_gpus)
@@ -131,12 +133,14 @@ class Trainer:
             iter_dur = time.time() - iter_start
 
             return_stat = {k: v.item() for k, v in self.ep_info_dict.items()}
+            self.ctrl.lock.acquire()
             print("Process: {:1d} | ".format(self.rank) + "Global Step: {: >5d} | ".format(self.global_step) +
                   "Frames: {: >10d} | ".format(self.num_frames) +
                   "Average Return: {: >8.2f} | ".format(return_stat['ep_return/avg']) +
                   "Sample Time: {: >6.2f}s | ".format(sample_time) +
                   "Optimization Time: {: >6.2f}s | ".format(optimize_time) +
                   "Iteration Step Time: {: >6.2f}s".format(iter_dur))
+            self.ctrl.lock.release()
 
             if (self.rank == 0 or self.world_size == 1) and not self.config.no_summary:
                 self.summary(loss_stat, return_stat, sample_time, optimize_time, iter_dur)

@@ -5,6 +5,7 @@ import numpy as np
 
 import torch
 import torch.multiprocessing as mp
+from collections import namedtuple
 from env.mujoco.env_with_memory import EnvWithMemory, VecEnvWithMemory
 from env.mujoco.model.model import ActorCritic, compute_loss
 from env.mujoco.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Info
@@ -127,6 +128,8 @@ if __name__ == "__main__":
                                    config=config)
     rollout_runner.run()
 
+    Ctrl = namedtuple('Ctrl', ['barrier', 'lock'])
+    ctrl = Ctrl(mp.Barrier(config.num_gpus) if config.num_gpus > 1 else None, mp.Lock())
     # initialize trainer for each GPU and start DDP training
     if not config.cluster:
         ranks = find_free_gpu(config.num_gpus)
@@ -138,6 +141,7 @@ if __name__ == "__main__":
                 model=learner_prototype,
                 loss_fn=compute_loss,
                 buffer=rollout_runner.buffer,
+                ctrl=ctrl,
                 global_weights=rollout_runner.global_weights,
                 weights_available=rollout_runner.weights_available,
                 ep_info_dict=rollout_runner.ep_info_dict,
