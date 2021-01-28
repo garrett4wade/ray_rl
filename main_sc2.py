@@ -59,6 +59,12 @@ parser.add_argument('--num_workers', type=int, default=32, help='remote worker n
 parser.add_argument('--cpu_per_worker', type=int, default=1, help='cpu used per worker')
 parser.add_argument('--q_size', type=int, default=8, help='number of batches in replay buffer')
 
+# save and load
+parser.add_argument('--load_ckpt', action='store_true')
+parser.add_argument('--load_ckpt_file', type=str, default='./ckpt')
+parser.add_argument('--save_ckpt', action='store_true')
+parser.add_argument('--save_ckpt_dir', type=str, default='./ckpt')
+
 # random seed
 parser.add_argument('--seed', type=int, default=0, help='random seed')
 

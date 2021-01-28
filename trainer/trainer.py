@@ -69,6 +69,12 @@ class Trainer:
             self.learner = self.learner_prototype.cuda()
             print(f"Trainer Set Up: initializing training on single GPU rank {self.rank}.")
 
+        # load ckpt if needed
+        if self.config.load_ckpt:
+            if self.world_size > 1:
+                dist.barrier()
+            self.learner.load_state_dict(torch.load(self.config.load_ckpt_file, map_location={'cpu': 'cuda'}))
+
         # set up optimizer
         if self.optimizer_nickname == 'adam':
             self.optimizer = torch.optim.Adam(self.learner.parameters(), lr=self.config.lr)
@@ -97,6 +103,8 @@ class Trainer:
     def run(self):
         self.setup()
         while self.num_frames < self.config.total_frames:
+            if self.world_size > 1:
+                dist.barrier()
             # sample and load into gpu
             iter_start = time.time()
             data_batch = self.buffer.get(self.ctrl.barrier)
@@ -144,6 +152,11 @@ class Trainer:
 
             if (self.rank == 0 or self.world_size == 1) and not self.config.no_summary:
                 self.summary(loss_stat, return_stat, sample_time, optimize_time, iter_dur)
+            
+            if (self.rank == 0 or self.world_size == 1) and self.config.save_ckpt and self.global_step % self.config.save_interval == 0:
+                ckpt_file = os.path.join(self.config.save_ckpt_dir, str(self.global_step) + '.pt')
+                torch.save({k: v.cpu() for k, v in self.learner.state_dict().items()}, ckpt_file)
+
         self.teardown()
         if (self.rank == 0 or self.world_size == 1) and not self.config.no_summary:
             self.wandb_exp.finish()
