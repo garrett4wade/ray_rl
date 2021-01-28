@@ -61,7 +61,7 @@ class ActorCritic(nn.Module):
 
 
 def compute_loss(learner, obs, action, action_logits, adv, value, value_target, pad_mask, rnn_hidden, clip_ratio,
-                 world_size):
+                 world_size, value_clip=True):
     if isinstance(learner, DDP):
         assert world_size > 1
         adv_mean = adv.mean()
@@ -93,8 +93,11 @@ def compute_loss(learner, obs, action, action_logits, adv, value, value_target, 
     p_surr = adv * torch.clamp(rhos, 1 - clip_ratio, 1 + clip_ratio)
     p_loss = (-torch.min(p_surr, rhos * adv) * pad_mask).mean()
 
-    cur_v_clipped = value + torch.clamp(cur_state_value - value, -clip_ratio, clip_ratio)
-    v_loss = torch.max(F.mse_loss(cur_state_value, value_target), F.mse_loss(cur_v_clipped, value_target))
+    if value_clip:
+        cur_v_clipped = value + torch.clamp(cur_state_value - value, -clip_ratio, clip_ratio)
+        v_loss = torch.max((cur_state_value - value_target)**2, (cur_v_clipped - value_target)**2)
+    else:
+        v_loss = (cur_state_value - value_target)**2
     v_loss = (v_loss * pad_mask).mean()
 
     entropy_loss = (-target_dist.entropy() * pad_mask).mean()

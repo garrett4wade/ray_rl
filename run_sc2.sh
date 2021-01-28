@@ -7,7 +7,7 @@ batch_size=512
 num_workers=55
 num_env=2
 group_name="sc2"
-env_names=("MMM2")
+env_names=("5m_vs_6m")
 num_frames=200000000
 seeds=(58026)
 for env_name in ${env_names[@]}
@@ -15,9 +15,9 @@ do
     job_name=env_name
     for seed in ${seeds[@]}
     do
-        exp_name="rec_"${env_name}"_"${num_env}"*"${num_workers}"_seed"${seed}
+        exp_name="rec_novclip_"${env_name}"_"${num_env}"*"${num_workers}"_seed"${seed}
         echo "current experiment ${exp_name}"
-        python3.8 main_sc2.py --exp_name ${exp_name} \
+        nohup python3.8 -u main_sc2.py --exp_name ${exp_name} \
                                 --env_name ${env_name} \
                                 --wandb_group ${group_name} \
                                 --wandb_job ${job_name} \
@@ -30,7 +30,7 @@ do
                                 --push_period 2 \
                                 --num_writers 2 \
                                 --num_gpus 1 \
-                                >> log/MMM2.log
+                                >> log/${exp_name}.log
         pkill -9 ray
         pkill -9 Main_Thread
         pkill -9 python3.8
