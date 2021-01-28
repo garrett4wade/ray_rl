@@ -96,25 +96,33 @@ class EnvWithMemory:
         for k, v in data_batch.items():
             if 'rnn_hidden' in k:
                 indices = np.arange(chunk_num) * self.chunk_len
-                chunks[k] = np.transpose(v[indices], (1, 0, 2))
+                chunks[k] = np.swapaxes(v[indices], 1, 0)
             else:
                 if len(v) < target_len:
                     pad = tuple([(0, target_len - len(v))] + [(0, 0)] * (v.ndim - 1))
                     pad_v = np.pad(v, pad, 'constant', constant_values=0)
                 else:
                     pad_v = v
-                chunks[k] = pad_v.reshape(self.chunk_len, chunk_num, *v.shape[1:])
+                chunks[k] = np.swapaxes(pad_v.reshape(chunk_num, self.chunk_len, *v.shape[1:]), 1, 0)
         self.stored_chunk_num += chunk_num
         return Seg(**chunks)
 
-    def compute_gae(self):
+    def compute_gae(self, bootstrap_step=np.inf):
         reward = np.array(self.history['reward'], dtype=np.float32)
         value = np.array(self.history['value'], dtype=np.float32)
+        assert reward.ndim == 1 and value.ndim == 1
         bootstrap_v = np.array(self.history['value'][1:] + [0], dtype=np.float32)
         one_step_td = reward + self.gamma * bootstrap_v - value
         adv = lfilter([1], [1, -self.lmbda * self.gamma], one_step_td[::-1])[::-1]
 
-        v_target = lfilter([1], [1, -self.gamma], reward[::-1])[::-1]
+        if bootstrap_step >= self.ep_step:
+            # monte carlo return
+            v_target = lfilter([1], [1, -self.gamma], reward[::-1])[::-1]
+        else:
+            # n-step TD return
+            discounted_r = lfilter(self.gamma**np.arange(self.chunk_len), [1], reward[::-1])[::-1]
+            bootstrapped_v = np.concatenate([value[bootstrap_step:], np.zeros(bootstrap_step, dtype=np.float32)])
+            v_target = discounted_r + self.gamma**bootstrap_step * bootstrapped_v
         return v_target, adv
 
 

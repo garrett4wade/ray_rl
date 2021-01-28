@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.signal import lfilter
-from env.atari.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Seg, Info
+from env.starcraft2.registry import get_shapes, ROLLOUT_KEYS, COLLECT_KEYS, DTYPES, Seg, Info
 
 
 class EnvWithMemory:
@@ -23,45 +23,57 @@ class EnvWithMemory:
         self.verbose = config.verbose
         self.reset()
 
-    def _preprocess(self, obs):
-        return np.transpose(obs, [2, 0, 1]).astype(np.uint8)
+    def _preprocess(self, obs, state, avail_action, agent_death):
+        return obs.astype(np.float32), state.astype(np.float32), avail_action.astype(np.uint8), agent_death.astype(
+            np.uint8)
 
     def _get_model_input(self):
-        return self.obs, self.rnn_hidden
+        return self.obs, self.state, self.avail_action, self.actor_rnn_hidden, self.critic_rnn_hidden
 
     def _init_rnn_hidden(self):
-        return np.zeros(self.shapes['rnn_hidden'], dtype=np.float32)
+        return (np.zeros(self.shapes['actor_rnn_hidden'],
+                         dtype=np.float32), np.zeros(self.shapes['critic_rnn_hidden'], dtype=np.float32))
 
     def reset(self):
         if self.verbose and self.done:
             print("Episode End: Step {}, Return {}".format(self.ep_step, self.ep_return))
-        self.obs = self._preprocess(self.env.reset())
-        self.rnn_hidden = self._init_rnn_hidden()
-        self.done = False
+        self.obs, self.state, self.avail_action, self.agent_death = self._preprocess(*self.env.reset())
+        self.actor_rnn_hidden, self.critic_rnn_hidden = self._init_rnn_hidden()
+        self.done = self.won = False
         self.ep_step = self.ep_return = 0
         self.reset_history()
 
-    def step(self, action, action_logits, value, rnn_hidden):
-        n_obs, r, d, _ = self.env.step(action)
-        n_obs = self._preprocess(n_obs)
+    def step(self, action, action_logits, value, actor_rnn_hidden, critic_rnn_hidden):
+        n_obs, n_state, n_avail_action, r, n_agent_death, d, info = self.env.step(action)
+        n_obs, n_state, n_avail_action, n_agent_death = self._preprocess(n_obs, n_state, n_avail_action, n_agent_death)
 
         self.ep_return += r
         self.ep_step += 1
 
         self.history['obs'].append(self.obs)
+        self.history['state'].append(self.state)
         self.history['action'].append(action)
         self.history['action_logits'].append(action_logits)
+        self.history['avail_action'].append(self.avail_action)
         self.history['reward'].append(r)
         self.history['value'].append(value)
-        self.history['rnn_hidden'].append(self.rnn_hidden)
+        self.history['actor_rnn_hidden'].append(self.actor_rnn_hidden)
+        self.history['critic_rnn_hidden'].append(self.critic_rnn_hidden)
+        self.history['live_mask'].append(1 - self.agent_death)
         self.history['pad_mask'].append(1 - self.done)
 
         self.obs = n_obs
-        self.rnn_hidden = rnn_hidden
+        self.state = n_state
+        self.avail_action = n_avail_action
+        self.actor_rnn_hidden = actor_rnn_hidden
+        self.critic_rnn_hidden = critic_rnn_hidden
+        self.agent_death = n_agent_death
         self.done = d or self.ep_step >= self.max_timesteps
+        self.won = info.get('battle_won', False)
+
         if self.done:
             self.history_ep_datas.append(self.collect())
-            self.history_ep_infos.append(Info(ep_return=self.ep_return))
+            self.history_ep_infos.append(Info(ep_return=self.ep_return, winning_rate=float(self.won)))
             self.reset()
             if self.stored_chunk_num >= self.min_return_chunk_num:
                 datas = self.history_ep_datas.copy()

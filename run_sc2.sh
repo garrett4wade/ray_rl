@@ -1,8 +1,10 @@
 pkill -9 ray
 pkill -9 Main_Thread
+pkill -9 python3.8
+rm -rf /dev/shm/*
 
-batch_size=256
-num_workers=50
+batch_size=512
+num_workers=55
 num_env=2
 group_name="sc2"
 env_names=("3m")
@@ -13,9 +15,9 @@ do
     job_name=env_name
     for seed in ${seeds[@]}
     do
-        exp_name="rec"${env_name}"_env"${num_env}"worker"${num_workers}"_seed"${seed}
+        exp_name="rec_"${env_name}${num_env}"*"${num_workers}"_seed"${seed}
         echo "current experiment ${exp_name}"
-        python main_sc2.py --exp_name ${exp_name} \
+        python3.8 main_sc2.py --exp_name ${exp_name} \
                                 --env_name ${env_name} \
                                 --wandb_group ${group_name} \
                                 --wandb_job ${job_name} \
@@ -24,10 +26,12 @@ do
                                 --seed ${seed} \
                                 --env_num ${num_env} \
                                 --num_workers ${num_workers} \
-                                --gpu_id 0 \
-                                --min_return_chunk_num 32
+                                --min_return_chunk_num 32 \
+                                --num_gpus 1
         pkill -9 ray
         pkill -9 Main_Thread
+        pkill -9 python3.8
+        rm -rf /dev/shm/*
         # wait for port release
         sleep 300
     done

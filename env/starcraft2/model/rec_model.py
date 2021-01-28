@@ -2,24 +2,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
-from rl_utils.initialization import init
+# from rl_utils.initialization import init
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, is_training, kwargs):
+    def __init__(self, is_training, config):
         super().__init__()
         self.is_training = is_training
-        if not is_training:
-            self.device = torch.device('cpu')
-        else:
-            self.device = torch.device(kwargs['gpu_id'] if torch.cuda.is_available() else 'cpu')
-
-        self.obs_dim = obs_dim = kwargs['obs_dim']
-        self.state_dim = state_dim = kwargs['state_dim']
-        self.action_dim = action_dim = kwargs['action_dim']
-        self.hidden_dim = hidden_dim = kwargs['hidden_dim']
-        self.actor_rnn_layers = actor_rnn_layers = kwargs['actor_rnn_layers']
-        self.critic_rnn_layers = critic_rnn_layers = kwargs['critic_rnn_layers']
+        self.obs_dim = obs_dim = config.obs_dim
+        self.state_dim = state_dim = config.state_dim
+        self.action_dim = action_dim = config.action_dim
+        self.hidden_dim = hidden_dim = config.hidden_dim
+        self.actor_rnn_layers = actor_rnn_layers = config.actor_rnn_layers
+        self.critic_rnn_layers = critic_rnn_layers = config.critic_rnn_layers
 
         # actor model
         self.actor_net = nn.Sequential(
@@ -47,13 +44,8 @@ class ActorCritic(nn.Module):
         self.critic_gate = nn.Linear(hidden_dim, hidden_dim)
         self.critic_head = nn.Linear(hidden_dim, 1)
 
-        self.clip_ratio = kwargs['clip_ratio']
-        self.chunk_len = kwargs['chunk_len']
-        self.burn_in_len = kwargs['burn_in_len']
-        self.tpdv = dict(device=self.device, dtype=torch.float32)
-        for c in self.children():
-            init(c)
-        self.to(self.device)
+        # for c in self.children():
+        #     init(c)
 
     def core(self, obs, state, actor_rnn_hidden, critic_rnn_hidden):
         """core function invoked during both rollout and backpropagation
@@ -128,37 +120,41 @@ class ActorCritic(nn.Module):
         ahout, chout = ahout.transpose_(0, 1), chout.transpose_(0, 1)
         return action.numpy(), logits.numpy(), value.numpy(), ahout.numpy(), chout.numpy()
 
-    def compute_loss(self, obs, state, action, action_logits, avail_action, adv, value, value_target, actor_rnn_hidden,
-                     critic_rnn_hidden, pad_mask, live_mask):
-        if len(obs) > self.chunk_len:
-            # burn-in
-            with torch.no_grad():
-                _, _, actor_rnn_hidden, critic_rnn_hidden = self.core(obs[:self.burn_in_len], state[:self.burn_in_len],
-                                                                      actor_rnn_hidden, critic_rnn_hidden)
-                obs = obs[self.burn_in_len:]
-                state = state[self.burn_in_len:]
-        action = action.to(torch.long)
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
-        target_action_logits, cur_state_value, _, _ = self(obs, state, actor_rnn_hidden, critic_rnn_hidden)
-        target_action_logits[avail_action == 0.0] = -1e10
+def compute_loss(learner, obs, state, action, action_logits, avail_action, adv, value, value_target, actor_rnn_hidden,
+                 critic_rnn_hidden, pad_mask, live_mask, clip_ratio, world_size):
+    if isinstance(learner, DDP):
+        assert world_size > 1
+        adv_mean = adv.mean()
+        adv_meansq = adv.pow(2).mean()
+        # all reduce to advantage mean & std
+        dist.all_reduce_multigpu([adv_mean])
+        dist.all_reduce_multigpu([adv_meansq])
+        adv_mean = adv_mean / world_size
+        adv_meansq = adv_meansq / world_size
+        adv_std = (adv_meansq - adv_mean.pow(2)).sqrt()
+    else:
+        adv_mean = adv.mean()
+        adv_std = adv.std(unbiased=False)
+    adv = (adv - adv_mean) / (adv_std + 1e-8)
+    action = action.to(torch.long)
 
-        target_dist = Categorical(logits=target_action_logits)
-        target_action_logprobs = target_dist.log_prob(action)
-        behavior_action_logprobs = Categorical(logits=action_logits).log_prob(action)
+    target_action_logits, cur_state_value, _, _ = learner(obs, state, actor_rnn_hidden, critic_rnn_hidden)
+    target_action_logits[avail_action == 0.0] = -1e10
 
-        log_rhos = target_action_logprobs - behavior_action_logprobs.detach()
-        rhos = log_rhos.exp() * live_mask
+    target_dist = Categorical(logits=target_action_logits)
+    target_action_logprobs = target_dist.log_prob(action)
+    behavior_action_logprobs = Categorical(logits=action_logits).log_prob(action)
 
-        p_surr = adv * torch.clamp(rhos, 1 - self.clip_ratio, 1 + self.clip_ratio).mean(-1)
-        p_loss = (-torch.min(p_surr, rhos.mean(-1) * adv)).mean()
+    log_rhos = target_action_logprobs - behavior_action_logprobs.detach()
+    rhos = log_rhos.exp() * live_mask
 
-        cur_v_clipped = value + torch.clamp(cur_state_value - value, -self.clip_ratio, self.clip_ratio)
-        v_loss = torch.max(F.mse_loss(cur_state_value, value_target), F.mse_loss(cur_v_clipped, value_target))
-        v_loss = (v_loss * pad_mask).mean()
+    p_surr = adv * torch.clamp(rhos, 1 - clip_ratio, 1 + clip_ratio).mean(-1)
+    p_loss = (-torch.min(p_surr, rhos.mean(-1) * adv)).mean()
 
-        entropy_loss = (-target_dist.entropy() * live_mask).mean()
-        return v_loss, p_loss, entropy_loss
+    cur_v_clipped = value + torch.clamp(cur_state_value - value, -clip_ratio, clip_ratio)
+    v_loss = torch.max(F.mse_loss(cur_state_value, value_target), F.mse_loss(cur_v_clipped, value_target))
+    v_loss = (v_loss * pad_mask).mean()
 
-    def get_weights(self):
-        return {k: v.cpu() for k, v in self.state_dict().items()}
+    entropy_loss = (-target_dist.entropy() * live_mask).mean()
+    return v_loss, p_loss, entropy_loss

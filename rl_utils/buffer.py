@@ -147,7 +147,8 @@ class SharedCircularBuffer:
             tw = time.time()
             # get current batch and slot index
             b_idx, s_idx = (self.glb_wrt_ptr // self.bs_per) % self.num_batches, self.glb_wrt_ptr % self.bs_per
-            assert self.is_writable[b_idx] and not self.is_readable[b_idx], (self.is_readable, self.is_writable)
+            assert self.is_writable[b_idx] and not self.is_readable[b_idx], (self.is_readable, self.is_writable, b_idx,
+                                                                             s_idx)
             overflow = s_idx + seg_size >= self.bs_per
             if overflow:
                 self.is_writable[b_idx] = 0
