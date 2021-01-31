@@ -1,7 +1,6 @@
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
 
 from torch.distributions import Categorical
 from torch.nn.parallel import DistributedDataParallel as DDP

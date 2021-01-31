@@ -88,17 +88,41 @@ class Trainer:
         if self.world_size > 1:
             dist.destroy_process_group()
 
-    def train_learner_on_batch(self, data_batch):
-        self.optimizer.zero_grad()
-        v_loss, p_loss, entropy_loss = self.loss_fn(self.learner,
-                                                    clip_ratio=self.config.clip_ratio,
-                                                    world_size=self.world_size,
-                                                    **data_batch)
-        loss = p_loss + self.config.value_coef * v_loss + self.config.entropy_coef * entropy_loss
-        loss.backward()
-        grad_norm = torch.nn.utils.clip_grad_norm_(self.learner.parameters(), self.config.max_grad_norm)
-        self.optimizer.step()
-        return v_loss, p_loss, entropy_loss, grad_norm
+    def train_learner_on_batch(self, data_batch, n_minibatch):
+        if n_minibatch == 1:
+            self.optimizer.zero_grad()
+            v_loss, p_loss, entropy_loss = self.loss_fn(self.learner,
+                                                        clip_ratio=self.config.clip_ratio,
+                                                        world_size=self.world_size,
+                                                        **data_batch)
+            loss = p_loss + self.config.value_coef * v_loss + self.config.entropy_coef * entropy_loss
+            loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(self.learner.parameters(), self.config.max_grad_norm)
+            self.optimizer.step()
+            return v_loss, p_loss, entropy_loss, grad_norm
+        else:
+            batch_size = data_batch[list(data_batch.keys())[0]].shape[1]
+            minibs = batch_size // n_minibatch
+            assert batch_size % n_minibatch == 0
+            indices = torch.split(torch.randperm(batch_size), minibs)
+            v_losses, p_losses, entropy_losses, grad_norms = [], [], [], []
+            for idx in indices:
+                self.optimizer.zero_grad()
+                mini_databatch = {k: v[:, idx] for k, v in data_batch.items()}
+                v_loss, p_loss, entropy_loss = self.loss_fn(self.learner,
+                                                            clip_ratio=self.config.clip_ratio,
+                                                            world_size=self.world_size,
+                                                            **mini_databatch)
+                loss = p_loss + self.config.value_coef * v_loss + self.config.entropy_coef * entropy_loss
+                loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.learner.parameters(), self.config.max_grad_norm)
+                self.optimizer.step()
+                v_losses.append(v_loss)
+                p_losses.append(p_loss)
+                entropy_losses.append(entropy_loss)
+                grad_norms.append(grad_norm)
+            return (sum(v_losses) / n_minibatch, sum(p_losses) / n_minibatch, sum(entropy_losses) / n_minibatch,
+                    sum(grad_norms) / n_minibatch)
 
     def run(self):
         self.setup()
@@ -116,7 +140,7 @@ class Trainer:
                 update !
             '''
             start = time.time()
-            v_loss, p_loss, entropy_loss, grad_norm = self.train_learner_on_batch(data_batch)
+            v_loss, p_loss, entropy_loss, grad_norm = self.train_learner_on_batch(data_batch, self.config.n_minibatch)
             optimize_time = time.time() - start
 
             # broadcast updated learner parameters to each subprocess
@@ -152,8 +176,9 @@ class Trainer:
 
             if (self.rank == 0 or self.world_size == 1) and not self.config.no_summary:
                 self.summary(loss_stat, return_stat, sample_time, optimize_time, iter_dur)
-            
-            if (self.rank == 0 or self.world_size == 1) and self.config.save_ckpt and self.global_step % self.config.save_interval == 0:
+
+            if (self.rank == 0 or self.world_size == 1) and self.config.save_ckpt and (self.global_step %
+                                                                                       self.config.save_interval == 0):
                 ckpt_file = os.path.join(self.config.save_ckpt_dir, str(self.global_step) + '.pt')
                 torch.save({k: v.cpu() for k, v in self.learner.state_dict().items()}, ckpt_file)
 

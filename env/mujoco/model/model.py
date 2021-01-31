@@ -1,7 +1,6 @@
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.distributions import Normal
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -57,7 +56,17 @@ class ActorCritic(nn.Module):
         return [result.numpy() for result in results]
 
 
-def compute_loss(learner, obs, action, action_logits, adv, value, value_target, pad_mask, clip_ratio, world_size, value_clip=True):
+def compute_loss(learner,
+                 obs,
+                 action,
+                 action_logits,
+                 adv,
+                 value,
+                 value_target,
+                 pad_mask,
+                 clip_ratio,
+                 world_size,
+                 value_clip=True):
     if isinstance(learner, DDP):
         assert world_size > 1
         action_scale = learner.module.action_scale

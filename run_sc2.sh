@@ -3,9 +3,9 @@ pkill -9 Main_Thread
 pkill -9 python3.8
 # rm -rf /dev/shm/*
 
-batch_size=512
-num_workers=55
-num_env=2
+batch_size=128
+num_workers=20
+num_env=1
 group_name="sc2"
 env_names=("5m_vs_6m")
 num_frames=200000000
@@ -15,9 +15,9 @@ do
     job_name=env_name
     for seed in ${seeds[@]}
     do
-        exp_name="rec_novclip_"${env_name}"_"${num_env}"*"${num_workers}"_seed"${seed}
+        exp_name="novclip_"${env_name}"_"${num_env}"*"${num_workers}"_seed"${seed}
         echo "current experiment ${exp_name}"
-        nohup python3.8 -u main_sc2.py --exp_name ${exp_name} \
+        python3.8 -u main_sc2.py --exp_name ${exp_name} \
                                 --env_name ${env_name} \
                                 --wandb_group ${group_name} \
                                 --wandb_job ${job_name} \
@@ -26,11 +26,12 @@ do
                                 --seed ${seed} \
                                 --env_num ${num_env} \
                                 --num_workers ${num_workers} \
-                                --min_return_chunk_num 32 \
+                                --min_return_chunk_num 5 \
                                 --push_period 2 \
-                                --num_writers 2 \
+                                --num_writers 8 \
                                 --num_gpus 1 \
-                                >> log/${exp_name}.log
+                                --q_size 4 \
+                                --no_summary
         pkill -9 ray
         pkill -9 Main_Thread
         pkill -9 python3.8

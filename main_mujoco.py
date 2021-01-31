@@ -29,6 +29,7 @@ parser.add_argument('--env_num', type=int, default=16, help='# evironments per w
 parser.add_argument('--total_frames', type=int, default=int(100e6), help='optimization batch size')
 
 # important parameters of model and algorithm
+parser.add_argument('--n_minibatch', type=int, default=4, help='# of mini-batches')
 parser.add_argument('--hidden_dim', type=int, default=256, help='hidden layer size of mlp & gru')
 parser.add_argument('--batch_size', type=int, default=512, help='optimization batch size')
 parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')

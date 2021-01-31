@@ -126,6 +126,9 @@ class SharedCircularBuffer:
         # indicate of whether each batch is ready to be written
         self._is_writable_shm, self.is_writable = shm_array_from_smm(self._smm, (num_batches, ), np.uint8)
         self.is_writable[:] = np.ones((num_batches, ), dtype=np.uint8)[:]
+        # just for debugging
+        self._is_reading_shm, self.is_reading = shm_array_from_smm(self._smm, (num_batches, ), np.uint8)
+        self._is_writing_shm, self.is_writing = shm_array_from_smm(self._smm, (num_batches, ), np.uint8)
 
         self._received_sample_shm, self.received_sample = shm_array_from_smm(self._smm, (), np.int64)
         self._glb_wrt_ptr_shm, self.glb_wrt_ptr = shm_array_from_smm(self._smm, (), np.int64)
@@ -147,8 +150,9 @@ class SharedCircularBuffer:
             tw = time.time()
             # get current batch and slot index
             b_idx, s_idx = (self.glb_wrt_ptr // self.bs_per) % self.num_batches, self.glb_wrt_ptr % self.bs_per
+            # TODO: sometimes this assertion does not pass, need to debug
             assert self.is_writable[b_idx] and not self.is_readable[b_idx], (self.is_readable, self.is_writable, b_idx,
-                                                                             s_idx)
+                                                                             s_idx, self.is_reading, self.is_writing)
             overflow = s_idx + seg_size >= self.bs_per
             if overflow:
                 self.is_writable[b_idx] = 0
@@ -161,6 +165,7 @@ class SharedCircularBuffer:
                     b_idx2 = nex_b_idx
                     while not self.is_writable[b_idx2]:
                         b_idx2 = (b_idx2 + 1) % self.num_batches
+                    assert not self.is_readable[b_idx2]
                 else:
                     # if there's no writable batch, find the next readable batch and overwrite it
                     all_readable_indices = np.nonzero(self.is_readable)[0]
@@ -168,14 +173,21 @@ class SharedCircularBuffer:
                     b_idx2 = nex_b_idx
                     while not self.is_readable[b_idx2]:
                         b_idx2 = (b_idx2 + 1) % self.num_batches
+                    assert not self.is_writable[b_idx2]
                     self.is_writable[b_idx2] = 1
                     self.is_readable[b_idx2] = 0
                 self.glb_wrt_ptr[()] = b_idx2 * self.bs_per + remaining
+                self.is_writing[b_idx] = 1
+                self.is_writing[b_idx2] = 1
             else:
                 self.glb_wrt_ptr += seg_size
+                # self.glb_wrt_ptr[()] = (self.glb_wrt_ptr + seg_size) % (self.num_batches * self.bs_per)
+                self.is_writing[b_idx] = 1
+                # for debug
+                assert (self.glb_wrt_ptr // self.bs_per) % self.num_batches == b_idx
+                assert b_idx * self.bs_per + s_idx + seg_size == self.glb_wrt_ptr.item() % (self.num_batches *
+                                                                                            self.bs_per)
         finally:
-            # for debug
-            # assert not np.any(np.logical_and(self.is_readable, self.is_writable))
             self._read_ready.release()
         t2 = time.time()
 
@@ -194,7 +206,9 @@ class SharedCircularBuffer:
         try:
             self.received_sample += seg_size
             if overflow:
+                self.is_writing[b_idx] = 0
                 self.is_readable[b_idx] = 1
+                assert not self.is_writable[b_idx]
                 if np.sum(self.is_readable) >= self.world_size:
                     self._read_ready.notify(self.world_size)
         finally:
@@ -215,6 +229,7 @@ class SharedCircularBuffer:
             b_idx = np.nonzero(self.is_readable)[0][0]
             assert self.is_readable[b_idx] and not self.is_writable[b_idx]
             self.is_readable[b_idx] = 0
+            self.is_reading[b_idx] = 1
         finally:
             self._read_ready.release()
         t2 = time.time()
@@ -228,6 +243,7 @@ class SharedCircularBuffer:
         t3 = time.time()
         try:
             self._read_ready.acquire()
+            self.is_reading[b_idx] = 0
             self.used_times[b_idx] += 1
             if self.used_times[b_idx] >= self.reuse_times:
                 self.used_times[b_idx] = 0
@@ -236,8 +252,6 @@ class SharedCircularBuffer:
             else:
                 self.is_readable[b_idx] = 1
         finally:
-            # for debug
-            # assert not np.any(np.logical_and(self.is_readable, self.is_writable))
             self._read_ready.release()
         t4 = time.time()
         if self.verbose_time:

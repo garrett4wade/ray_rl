@@ -2,7 +2,7 @@ import ray
 import time
 
 
-@ray.remote(num_cpus=0.5, resources={'head': 1})
+@ray.remote(num_cpus=0, resources={'head': 1})
 class ParameterServer:
     def __init__(self, weights):
         self.weights = weights

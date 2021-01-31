@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.distributions import Categorical
 # from rl_utils.initialization import init
 import torch.distributed as dist
