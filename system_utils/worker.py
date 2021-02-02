@@ -49,12 +49,18 @@ class RolloutWorker:
         return next(self._data_g)
 
 
+@ray.remote(num_cpus=0, resources={'head': 1})
 class RolloutCollector:
-    def __init__(self, model_fn, worker_env_fn, ps, config):
-        self.num_workers = config.num_workers
+    def __init__(self, collector_id, model_fn, worker_env_fn, ps, config):
+        self.id = collector_id
+        self.num_workers = config.num_workers // config.num_collectors
+        assert config.num_workers % config.num_collectors == 0
         self.workers = [
-            RolloutWorker.remote(worker_id=i, model_fn=model_fn, worker_env_fn=worker_env_fn, ps=ps, config=config)
-            for i in range(self.num_workers)
+            RolloutWorker.remote(worker_id=i + collector_id * config.num_collectors,
+                                 model_fn=model_fn,
+                                 worker_env_fn=worker_env_fn,
+                                 ps=ps,
+                                 config=config) for i in range(self.num_workers)
         ]
         self.working_jobs = []
         # job_hashing maps job id to worker index
@@ -62,7 +68,7 @@ class RolloutCollector:
 
         self._data_id_g = self._data_id_generator()
         print("---------------------------------------------------")
-        print("              Workers starting ......              ")
+        print("   Starting workers in rollout collector {} ......  ".format(self.id))
         print("---------------------------------------------------")
 
     def _start(self):
@@ -85,7 +91,7 @@ class RolloutCollector:
             new_sample_job, new_info_job = self.workers[worker_id].get.remote()
             self.working_jobs.append(new_sample_job)
             self.job_hashing[new_sample_job] = (worker_id, new_info_job)
-            yield ready_sample_job, ready_info_job, wait_time
+            yield ray.get(ready_sample_job), ray.get(ready_info_job), wait_time
 
     def get_sample_ids(self):
         return next(self._data_id_g)

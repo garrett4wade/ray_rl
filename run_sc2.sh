@@ -3,11 +3,11 @@ pkill -9 Main_Thread
 pkill -9 python3.8
 # rm -rf /dev/shm/*
 
-batch_size=128
-num_workers=20
-num_env=1
+batch_size=512
+num_workers=55
+num_env=2
 group_name="sc2"
-env_names=("5m_vs_6m")
+env_names=("8m")
 num_frames=200000000
 seeds=(58026)
 for env_name in ${env_names[@]}
@@ -15,7 +15,7 @@ do
     job_name=env_name
     for seed in ${seeds[@]}
     do
-        exp_name="novclip_"${env_name}"_"${num_env}"*"${num_workers}"_seed"${seed}
+        exp_name="vclip_"${env_name}"_"${num_env}"*"${num_workers}"_seed"${seed}
         echo "current experiment ${exp_name}"
         python3.8 -u main_sc2.py --exp_name ${exp_name} \
                                 --env_name ${env_name} \
@@ -26,12 +26,11 @@ do
                                 --seed ${seed} \
                                 --env_num ${num_env} \
                                 --num_workers ${num_workers} \
-                                --min_return_chunk_num 5 \
+                                --min_return_chunk_num 32 \
                                 --push_period 2 \
                                 --num_writers 8 \
                                 --num_gpus 1 \
-                                --q_size 4 \
-                                --no_summary
+                                --q_size 6
         pkill -9 ray
         pkill -9 Main_Thread
         pkill -9 python3.8

@@ -1,8 +1,9 @@
 import ray
 import torch
-import threading
+from utils.drain_queue import drain_ray_queue
 from ray.util.queue import Queue as RayQueue
 import zmq
+import itertools
 import os
 import numpy as np
 from copy import deepcopy
@@ -13,22 +14,35 @@ from system_utils.init_ray import initialize_ray_on_supervisor
 from system_utils.parameter_server import ParameterServer
 
 
+@ray.remote
+def send_seg(socket, seg, flags=0, copy=True, track=False):
+    data = np.concatenate([x.reshape(-1) for x in seg]).astype(np.float32)
+    socket.send(data, flags, copy=copy, track=track)
+    socket.recv()
+
+
 @ray.remote(num_cpus=0, resources={'head': 1})
 class Ray2ProcessSender:
-    def __init__(self, sender_id, ready_id_queue):
+    def __init__(self, sender_id, rollout_collector, info_queue, wait_time_queue):
         self.id = sender_id
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REQ)
         self.socket.bind('ipc:///dev/shm/ray2proc_' + str(sender_id))
-        self.ready_id_queue = ready_id_queue
+        self.rollout_collector = rollout_collector
+        self.info_queue = info_queue
+        self.wait_time_queue = wait_time_queue
 
     def send_seg(self, seg, flags=0, copy=True, track=False):
         data = np.concatenate([x.reshape(-1) for x in seg]).astype(np.float32)
         return self.socket.send(data, flags, copy=copy, track=track)
 
     def run(self):
+        job = self.rollout_collector.get_sample_ids.remote()
         while True:
-            seg = self.ready_id_queue.get()
+            seg, infos, wait_time = ray.get(job)
+            job = self.rollout_collector.get_sample_ids.remote()
+            self.info_queue.put(infos)
+            self.wait_time_queue.put(wait_time)
             self.send_seg(seg)
             self.socket.recv()
 
@@ -95,23 +109,29 @@ class SimulationSupervisor(mp.Process):
         self.wait_time = wait_time
         self.config = config
 
-        self.history_info = []
-        self.wait_times = []
-
     def run(self):
         initialize_ray_on_supervisor(self.config)
-        self.ready_id_queue = RayQueue(maxsize=4 * self.config.num_workers)
-        self.ps = ParameterServer.remote(self.weights)
-        self.rollout_collector = RolloutCollector(model_fn=self.model_fn,
-                                                  worker_env_fn=self.worker_env_fn,
-                                                  ps=self.ps,
-                                                  config=self.config)
-        sample_job = threading.Thread(target=self.sample_from_rollout_collector, daemon=True)
-        sample_job.start()
+        self.info_queue = RayQueue(maxsize=16 * self.config.num_workers)
+        self.wait_time_queue = RayQueue(maxsize=16 * self.config.num_workers)
+        self.ps = ParameterServer.remote(deepcopy(self.weights))
+        self.rollout_collectors = [
+            RolloutCollector.remote(collector_id=i,
+                                    model_fn=self.model_fn,
+                                    worker_env_fn=self.worker_env_fn,
+                                    ps=self.ps,
+                                    config=self.config) for i in range(self.config.num_collectors)
+        ]
 
-        senders = [Ray2ProcessSender.remote(i, self.ready_id_queue) for i in range(self.config.num_writers)]
-        for sender in senders:
-            sender.run.remote()
+        assert self.config.num_writers % self.config.num_collectors == 0
+        senders = [[
+            Ray2ProcessSender.remote(i + j * self.config.num_collectors, self.rollout_collectors[j], self.info_queue,
+                                     self.wait_time_queue)
+            for i in range(self.config.num_writers // self.config.num_collectors)
+        ] for j in range(self.config.num_collectors)]
+        for sender_grp in senders:
+            for sender in sender_grp:
+                sender.run.remote()
+
         receivers = [
             mp.Process(target=receive_and_put, args=(i, self.global_buffer)) for i in range(self.config.num_writers)
         ]
@@ -124,26 +144,24 @@ class SimulationSupervisor(mp.Process):
                 ray.get(upload_job)
                 upload_job = self.ps.set_weights.remote(deepcopy(self.weights))
                 self.weights_available.copy_(torch.tensor(0))
-                self.queue_util.copy_(torch.tensor(self.ready_id_queue.qsize() / (4 * self.config.num_workers)))
-                if len(self.wait_times) > 0:
-                    self.wait_time.copy_(torch.tensor(np.mean(self.wait_times)))
-                    self.wait_times = []
-                if len(self.history_info) > 0:
-                    for k in self.history_info[0]._fields:
-                        self.ep_info_dict[k + '/avg'].copy_(
-                            torch.tensor(np.mean([getattr(info, k) for info in self.history_info])))
-                        self.ep_info_dict[k + '/min'].copy_(
-                            torch.tensor(np.min([getattr(info, k) for info in self.history_info])))
-                        self.ep_info_dict[k + '/max'].copy_(
-                            torch.tensor(np.max([getattr(info, k) for info in self.history_info])))
-                    self.history_info = []
+                # self.queue_util.copy_(torch.tensor(self.ready_id_queue.qsize() / (4 * self.config.num_workers)))
+                wts = drain_ray_queue(self.wait_time_queue)
+                if len(wts) > 0:
+                    self.wait_time.copy_(torch.tensor(np.mean(wts)))
+                history_infos = list(itertools.chain(*drain_ray_queue(self.info_queue)))
+                if len(history_infos) > 0:
+                    for k in history_infos[0]._fields:
+                        info_data = [getattr(info, k) for info in history_infos]
+                        self.ep_info_dict[k + '/avg'].copy_(torch.tensor(np.mean(info_data)))
+                        self.ep_info_dict[k + '/min'].copy_(torch.tensor(np.min(info_data)))
+                        self.ep_info_dict[k + '/max'].copy_(torch.tensor(np.max(info_data)))
 
-    def sample_from_rollout_collector(self):
-        while True:
-            ready_seg_id, ready_info_id, wait_time = self.rollout_collector.get_sample_ids()
-            self.ready_id_queue.put(ready_seg_id)
-            self.history_info += ray.get(ready_info_id)
-            self.wait_times.append(wait_time)
+    # def sample_from_rollout_collector(self):
+    #     while True:
+    #         ready_seg_id, ready_info_id, wait_time = self.rollout_collector.get_sample_ids()
+    #         self.ready_id_queue.put(ready_seg_id)
+    #         self.history_info += ray.get(ready_info_id)
+    #         self.wait_times.append(wait_time)
 
     def terminate(self):
         ray.shutdown()

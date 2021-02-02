@@ -1,7 +1,7 @@
 pkill -9 ray
 pkill -9 python3.8
 rm -rf /dev/shm/*
-num_workers=(48)
+num_workers=(32)
 num_env=16
 group_name="cluster"
 job_name="cluster"
@@ -20,8 +20,9 @@ do
                             --num_workers ${num_worker} \
                             --min_return_chunk_num 64 \
                             --batch_size 2560 \
-                            --num_writers 1 \
-                            --num_gpus 4
+                            --num_writers 4 \
+                            --num_gpus 1 \
+                            --no_summary
     pkill -9 ray
     pkill -9 python3.8
     rm -rf /dev/shm/*

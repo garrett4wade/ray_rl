@@ -26,6 +26,12 @@ if __name__ == "__main__":
     for i in range(pods_num):
         pods.append(Pod(*all_pods_str[i * 5:(i + 1) * 5]))
 
+    if args.restart:
+        wandb_apikey = '6bda9cf410e5e5d857441c4d0b3a1a8cb82b4ea3'
+    for pod in pods:
+        if pod.status == 'Running' and 'head' in pod.name:
+            os.system('kubectl exec -it {} -- wandb login '.format(pod.name) + wandb_apikey)
+
     if args.copy:
         # copy codes to pods
         code_folder = '~/workspace/ray_rl'
