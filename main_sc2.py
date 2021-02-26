@@ -66,7 +66,7 @@ parser.add_argument('--q_size', type=int, default=8, help='number of batches in 
 parser.add_argument('--load_ckpt', action='store_true')
 parser.add_argument('--load_ckpt_file', type=str, default='./ckpt')
 parser.add_argument('--save_ckpt', action='store_true')
-parser.add_argument('--save_interval', type=int, default=100)
+parser.add_argument('--save_interval', type=int, default=1000)
 parser.add_argument('--save_ckpt_dir', type=str, default='./ckpt')
 
 # random seed
