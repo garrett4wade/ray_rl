@@ -40,10 +40,10 @@ parser.add_argument('--gamma', type=float, default=0.99, help='discount factor')
 parser.add_argument('--lmbda', type=float, default=0.95, help='gae discount factor')
 parser.add_argument('--clip_ratio', type=float, default=0.2, help='ppo clip ratio')
 parser.add_argument('--reuse_times', type=int, default=2, help='sample reuse times')
-parser.add_argument('--max_grad_norm', type=float, default=40.0, help='maximum gradient norm')
+parser.add_argument('--max_grad_norm', type=float, default=0.5, help='maximum gradient norm')
 parser.add_argument('--use_vtrace', action='store_true', help='whether to use vtrace')
-parser.add_argument('--actor_rnn_layers', type=int, default=2, help='whether to use vtrace')
-parser.add_argument('--critic_rnn_layers', type=int, default=2, help='whether to use vtrace')
+parser.add_argument('--actor_rnn_layers', type=int, default=1, help='whether to use vtrace')
+parser.add_argument('--critic_rnn_layers', type=int, default=1, help='whether to use vtrace')
 
 # recurrent model parameters
 parser.add_argument('--burn_in_len', type=int, default=0, help='rnn hidden state burn-in length')
@@ -65,6 +65,7 @@ parser.add_argument('--q_size', type=int, default=8, help='number of batches in 
 parser.add_argument('--load_ckpt', action='store_true')
 parser.add_argument('--load_ckpt_file', type=str, default='./ckpt')
 parser.add_argument('--save_ckpt', action='store_true')
+parser.add_argument('--save_interval', type=int, default=100)
 parser.add_argument('--save_ckpt_dir', type=str, default='./ckpt')
 
 # random seed

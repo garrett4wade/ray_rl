@@ -44,23 +44,19 @@ class EnvWithMemory:
         self.reset_history()
 
     def step(self, action, action_logits, value, actor_rnn_hidden, critic_rnn_hidden):
-        n_obs, n_state, n_avail_action, r, n_agent_death, d, info = self.env.step(action)
+        n_obs, n_state, n_avail_action, reward, n_agent_death, d, info = self.env.step(action)
         n_obs, n_state, n_avail_action, n_agent_death = self._preprocess(n_obs, n_state, n_avail_action, n_agent_death)
 
-        self.ep_return += r
+        self.ep_return += reward
         self.ep_step += 1
 
-        self.history['obs'].append(self.obs)
-        self.history['state'].append(self.state)
-        self.history['action'].append(action)
-        self.history['action_logits'].append(action_logits)
-        self.history['avail_action'].append(self.avail_action)
-        self.history['reward'].append(r)
-        self.history['value'].append(value)
-        self.history['actor_rnn_hidden'].append(self.actor_rnn_hidden)
-        self.history['critic_rnn_hidden'].append(self.critic_rnn_hidden)
-        self.history['live_mask'].append(1 - self.agent_death)
-        self.history['pad_mask'].append(1 - self.done)
+        live_mask = 1 - self.agent_death
+        pad_mask = 1 - self.done
+        for k in self.history.keys():
+            if getattr(self, k, None) is not None:
+                self.history[k].append(getattr(self, k))
+            else:
+                self.history[k].append(locals()[k])
 
         self.obs = n_obs
         self.state = n_state
@@ -121,7 +117,7 @@ class EnvWithMemory:
         self.stored_chunk_num += chunk_num
         return Seg(**chunks)
 
-    def compute_gae(self, bootstrap_step=np.inf):
+    def compute_gae(self, bootstrap_step=None):
         reward = np.array(self.history['reward'], dtype=np.float32)
         value = np.array(self.history['value'], dtype=np.float32)
         assert reward.ndim == 1 and value.ndim == 1
@@ -129,12 +125,13 @@ class EnvWithMemory:
         one_step_td = reward + self.gamma * bootstrap_v - value
         adv = lfilter([1], [1, -self.lmbda * self.gamma], one_step_td[::-1])[::-1]
 
+        bootstrap_step = self.chunk_len if bootstrap_step is None else bootstrap_step
         if bootstrap_step >= self.ep_step:
             # monte carlo return
             v_target = lfilter([1], [1, -self.gamma], reward[::-1])[::-1]
         else:
             # n-step TD return
-            discounted_r = lfilter(self.gamma**np.arange(self.chunk_len), [1], reward[::-1])[::-1]
+            discounted_r = lfilter(self.gamma**np.arange(bootstrap_step), [1], reward[::-1])[::-1]
             bootstrapped_v = np.concatenate([value[bootstrap_step:], np.zeros(bootstrap_step, dtype=np.float32)])
             v_target = discounted_r + self.gamma**bootstrap_step * bootstrapped_v
         return v_target, adv
