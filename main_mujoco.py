@@ -52,6 +52,7 @@ parser.add_argument('--min_return_chunk_num', type=int, default=32, help='minima
 # Ray distributed training parameters
 parser.add_argument('--ray_dashboard', action='store_true', help='use ray dashboard')
 parser.add_argument('--num_writers', type=int, default=4, help='# of buffer writers')
+parser.add_argument('--num_returns', type=int, default=4, help='# returns to wait in ray.wait')
 parser.add_argument('--num_collectors', type=int, default=2, help='# of buffer writers')
 parser.add_argument('--push_period', type=int, default=1, help='learner parameter upload period')
 parser.add_argument('--num_workers', type=int, default=32, help='remote worker numbers')
@@ -62,6 +63,7 @@ parser.add_argument('--q_size', type=int, default=8, help='number of batches in 
 parser.add_argument('--load_ckpt', action='store_true')
 parser.add_argument('--load_ckpt_file', type=str, default='./ckpt')
 parser.add_argument('--save_ckpt', action='store_true')
+parser.add_argument('--save_interval', type=int, default=100)
 parser.add_argument('--save_ckpt_dir', type=str, default='./ckpt')
 
 # random seed
