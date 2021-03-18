@@ -18,31 +18,47 @@ class ActorCritic(nn.Module):
         self.actor_rnn_layers = actor_rnn_layers = config.actor_rnn_layers
         self.critic_rnn_layers = critic_rnn_layers = config.critic_rnn_layers
 
+        def init_rnn(m):
+            for name, param in m.named_parameters():
+                if 'bias' in name:
+                    nn.init.zeros_(param)
+                elif 'weight' in name:
+                    nn.init.orthogonal_(param)
+            return m
+
+        def init_linear(m):
+            # kaiming uniform initialization
+            # nn.init.orthogonal_(m.weight.data, gain=0.01)
+            # nn.init.zeros_(m.bias.data)
+            return m
+
         # actor model
         self.actor_net = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
+            # nn.LayerNorm([obs_dim]),
+            init_linear(nn.Linear(obs_dim, hidden_dim)),
             nn.ReLU(),
             nn.LayerNorm([hidden_dim]),
-            nn.Linear(hidden_dim, hidden_dim),
+            init_linear(nn.Linear(hidden_dim, hidden_dim)),
             nn.ReLU(),
             nn.LayerNorm([hidden_dim]),
         )
-        self.actor_rnn = nn.GRU(hidden_dim, hidden_dim, num_layers=actor_rnn_layers)
-        self.actor_gate = nn.Linear(hidden_dim, hidden_dim)
-        self.actor_head = nn.Linear(hidden_dim, action_dim)
+        self.actor_rnn = init_rnn(nn.GRU(hidden_dim, hidden_dim, num_layers=actor_rnn_layers))
+        self.actor_gate = init_linear(nn.Linear(hidden_dim, hidden_dim))
+        self.actor_head = init_linear(nn.Linear(hidden_dim, action_dim))
 
         # critic model
         self.critic_net = nn.Sequential(
-            nn.Linear(state_dim, hidden_dim),
+            # nn.LayerNorm([state_dim]),
+            init_linear(nn.Linear(state_dim, hidden_dim)),
             nn.ReLU(),
             nn.LayerNorm([hidden_dim]),
-            nn.Linear(hidden_dim, hidden_dim),
+            init_linear(nn.Linear(hidden_dim, hidden_dim)),
             nn.ReLU(),
             nn.LayerNorm([hidden_dim]),
         )
-        self.critic_rnn = nn.GRU(hidden_dim, hidden_dim, num_layers=critic_rnn_layers)
-        self.critic_gate = nn.Linear(hidden_dim, hidden_dim)
-        self.critic_head = nn.Linear(hidden_dim, 1)
+        self.critic_rnn = init_rnn(nn.GRU(hidden_dim, hidden_dim, num_layers=critic_rnn_layers))
+        self.critic_gate = init_linear(nn.Linear(hidden_dim, hidden_dim))
+        self.critic_head = init_linear(nn.Linear(hidden_dim, 1))
 
         # # target critic model
         # # TODO: remain target critic model in actors only, since it will accelerate parameter loading
@@ -141,6 +157,13 @@ class ActorCritic(nn.Module):
         return action.numpy(), logits.numpy(), value.numpy(), ahout.numpy(), chout.numpy()
 
 
+def huber_loss(e, d=10.0):
+    a = (abs(e) <= d).float()
+    b = (e > d).float()
+    return a * e**2 + b * d * (2 * abs(e) - d)
+    # return e**2
+
+
 def compute_loss(learner,
                  obs,
                  state,
@@ -190,11 +213,12 @@ def compute_loss(learner,
     p_surr = adv * (torch.clamp(rhos, 1 - clip_ratio, 1 + clip_ratio) * live_mask).sum(-1)
     p_loss = (-torch.min(p_surr, rhos.sum(-1) * adv)).sum() / live_mask.sum()
 
+    # sync with mappo, huber loss
     if value_clip:
         cur_v_clipped = value + torch.clamp(cur_state_value - value, -clip_ratio, clip_ratio)
-        v_loss = torch.max((cur_state_value - value_target)**2, (cur_v_clipped - value_target)**2)
+        v_loss = torch.max(huber_loss(cur_state_value - value_target), huber_loss(cur_v_clipped - value_target))
     else:
-        v_loss = (cur_state_value - value_target)**2
+        v_loss = huber_loss(cur_state_value - value_target)
     v_loss = (v_loss * pad_mask).sum() / pad_mask.sum()
 
     entropy_loss = (-target_dist.entropy() * live_mask).sum() / live_mask.sum()

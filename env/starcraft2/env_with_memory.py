@@ -117,23 +117,14 @@ class EnvWithMemory:
         self.stored_chunk_num += chunk_num
         return Seg(**chunks)
 
-    def compute_gae(self, bootstrap_step=None):
+    def compute_gae(self):
         reward = np.array(self.history['reward'], dtype=np.float32)
         value = np.array(self.history['value'], dtype=np.float32)
         assert reward.ndim == 1 and value.ndim == 1
         bootstrap_v = np.array(self.history['value'][1:] + [0], dtype=np.float32)
         one_step_td = reward + self.gamma * bootstrap_v - value
         adv = lfilter([1], [1, -self.lmbda * self.gamma], one_step_td[::-1])[::-1]
-
-        bootstrap_step = self.chunk_len if bootstrap_step is None else bootstrap_step
-        if bootstrap_step >= self.ep_step:
-            # monte carlo return
-            v_target = lfilter([1], [1, -self.gamma], reward[::-1])[::-1]
-        else:
-            # n-step TD return
-            discounted_r = lfilter(self.gamma**np.arange(bootstrap_step), [1], reward[::-1])[::-1]
-            bootstrapped_v = np.concatenate([value[bootstrap_step:], np.zeros(bootstrap_step, dtype=np.float32)])
-            v_target = discounted_r + self.gamma**bootstrap_step * bootstrapped_v
+        v_target = adv + value
         return v_target, adv
 
 

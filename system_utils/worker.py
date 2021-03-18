@@ -53,7 +53,7 @@ class RolloutWorker:
 class RolloutCollector:
     def __init__(self, collector_id, model_fn, worker_env_fn, ps, config):
         self.id = collector_id
-        self.num_returns = config.num_returns
+        self.num_returns = 1
         self.num_workers = config.num_workers // config.num_collectors
         assert config.num_workers % config.num_collectors == 0
         self.workers = [
